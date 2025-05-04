@@ -98,6 +98,9 @@ typedef struct cbuild_target target_t;
 /* Opaque handle for build commands (forward declaration) */
 typedef struct cbuild_command command_t;
 
+/* Opaque handle for subprojects (forward declaration) */
+typedef struct cbuild_subproject subproject_t;
+
 /* Subcommand callback definition */
 typedef void (*cbuild_subcommand_callback)(void *user_data);
 
@@ -191,9 +194,6 @@ void cbuild_self_rebuild_if_needed(int argc, char **argv, const char **sources, 
 void cbuild_enable_compile_commands(int enabled);
 
 /* --- Subproject API --- */
-
-/* Opaque handle for subprojects (forward declaration) */
-typedef struct cbuild_subproject subproject_t;
 
 /**
  * Declare a subproject.
@@ -304,6 +304,22 @@ void cbuild_register_subcommand(const char *name, target_t *target, const char *
   } while(0)
 
 
+/* --- Helpers and utils */
+// Helper: check if a file exists
+int cbuild_file_exists(const char *path);
+
+// Helper: check if a directory exists
+int cbuild_dir_exists(const char *path);
+
+// Helper: remove a file
+int cbuild_remove_file(const char *path);
+
+// Helper: remove a directory recursively
+int cbuild_remove_dir(const char *path);
+
+// Helper: get the current working directory
+int cbuild_get_cwd(char *buf, long size);
+
 #ifdef __cplusplus
 }
 #endif
@@ -328,11 +344,17 @@ void cbuild_register_subcommand(const char *name, target_t *target, const char *
   #include <process.h>   // _beginthreadex, _spawn
   #include <direct.h>    // _mkdir
   #include <io.h>        // _access or _stat
+  #define stat _stat
+  #define unlink _unlink
+  #define rmdir _rmdir
+  #define getcwd _getcwd
+  #define PATH_MAX MAX_PATH
 #else
   #include <pthread.h>
   #include <unistd.h>
   #include <dirent.h>
   #include <fcntl.h>
+  #include <limits.h>
 #endif
 
 // --- Pretty-printing helpers (ANSI colors) ---
@@ -587,6 +609,67 @@ static int g_subproject_count = 0, g_subproject_cap = 0;
 
 /* --- Implementation: Utility Functions --- */
 
+// Public Helper: check if a file exists
+int cbuild_file_exists(const char *path) {
+    if (!path || !*path) return 0;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+// Public Helper: check if a directory exists
+int cbuild_dir_exists(const char *path) {
+    if (!path || !*path) return 0;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// Public Helper: remove a file
+int cbuild_remove_file(const char *path) {
+    if (!path || !*path) return -1;
+    if (!cbuild_file_exists(path)) return 0;
+    return unlink(path);
+}
+
+// Public Helper: remove a directory recursively
+int cbuild_remove_dir(const char *path) {
+    if (!path || !*path) return -1;
+    if (!cbuild_dir_exists(path)) return 0;
+#ifdef _WIN32
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", path);
+    return system(cmd);
+#else
+    DIR *dir;
+    struct dirent *entry;
+    char full_path[PATH_MAX];
+    if (!(dir = opendir(path))) return -1;
+    while ((entry = readdir(dir))) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        struct stat st;
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (cbuild_remove_dir(full_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else {
+            if (cbuild_remove_file(full_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        }
+    }
+    closedir(dir);
+    return rmdir(path);
+#endif
+}
+
+// Public Helper: get the current working directory
+int cbuild_get_cwd(char *buf, long size) {
+    if (!buf || size <= 0) return -1;
+    return getcwd(buf, size) ? 0 : -1;
+}
+
 // Helper: join two paths with a slash
 static char *cbuild__join_path(const char *a, const char *b) {
     size_t la = strlen(a), lb = strlen(b);
@@ -609,7 +692,7 @@ static void cbuild__trim(char *s) {
 // Helper: parse manifest by calling subproject's cbuild with --manifest flag
 static void cbuild__parse_manifest(subproject_t *sub) {
     if (sub->manifest_loaded) return;
-    
+
     // Construct the command to run the subproject's cbuild with --manifest
     char *cmd = NULL;
 #ifdef _WIN32
@@ -622,30 +705,30 @@ static void cbuild__parse_manifest(subproject_t *sub) {
     char *output = NULL;
     int result = run_command(cmd, 1, &output);
     free(cmd);
-    
+
     if (result != 0 || !output) {
         fprintf(stderr, "cbuild: Failed to get manifest from subproject '%s'\n", sub->alias);
         if (output) free(output);
         return;
     }
-    
+
     // Parse the output line by line
     char *saveptr = NULL;
     char *line = strtok_r(output, "\r\n", &saveptr);
-    
+
     while (line) {
         cbuild__trim(line);
         if (!line[0] || line[0] == '#') {
             line = strtok_r(NULL, "\r\n", &saveptr);
             continue;
         }
-        
+
         // Format: TYPE NAME PATH
         char *line_copy = strdup(line);
         char *type = strtok(line_copy, " \t");
         char *name = strtok(NULL, " \t");
         char *path = strtok(NULL, "\r\n");
-        
+
         if (type && name && path) {
             cbuild__trim(path);
             // Add to sub->targets
@@ -659,11 +742,11 @@ static void cbuild__parse_manifest(subproject_t *sub) {
             sub->targets[sub->target_count].proxy_target = NULL;
             sub->target_count++;
         }
-        
+
         free(line_copy);
         line = strtok_r(NULL, "\r\n", &saveptr);
     }
-    
+
     free(output);
     sub->manifest_loaded = 1;
 }
@@ -1337,12 +1420,12 @@ int cbuild_run(int argc, char **argv) {
     if (argc > 1) {
         if (strcmp(argv[1], "clean") == 0) {
             cbuild_pretty_step("CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
-            
+
             // First clean all subprojects
             for (int i = 0; i < g_subproject_count; ++i) {
                 subproject_t *sub = g_subprojects[i];
                 char *clean_cmd = NULL;
-                
+
                 cbuild_pretty_step("CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
 #ifdef _WIN32
                 append_format(&clean_cmd, "cd /d \"%s\" && \"%s\" clean", sub->directory, sub->cbuild_exe);
@@ -1351,19 +1434,19 @@ int cbuild_run(int argc, char **argv) {
 #endif
                 int result = run_command(clean_cmd, 0, NULL);
                 free(clean_cmd);
-                
+
                 if (result != 0) {
                     fprintf(stderr, "Warning: Failed to clean subproject '%s'\n", sub->alias);
                 }
             }
-            
+
             // Then clean the main project
             for (int i = 0; i < g_target_count; ++i) {
                 target_t *t = g_targets[i];
                 if (t->obj_dir) remove_dir_recursive(t->obj_dir);
                 if (t->output_file) remove_file(t->output_file);
             }
-            
+
             remove_dir_recursive(g_output_dir);
             cbuild_pretty_status(1, "Clean complete.");
             return 0;
