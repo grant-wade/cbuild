@@ -516,7 +516,6 @@ static char *g_ar = NULL;              // static library archiver command (ar or
 static char *g_ld = NULL;              // linker command if needed (usually same as compiler for exec/shared)
 static char *g_global_cflags = NULL;   // global compiler flags (like debug symbols, optimizations)
 static char *g_global_ldflags = NULL;  // global linker flags
-static int   g_dep_tracking = 0;       // dependency tracking disabled by default
 
 /* Global list of subcommands */
 typedef struct cbuild_subcommand {
@@ -922,86 +921,6 @@ static int need_recompile(const char *src_file, const char *obj_file, const char
     if (st_src.st_mtime > st_obj.st_mtime) {
         return 1;
     }
-    // Only check dep file if dependency tracking is enabled
-    if (g_dep_tracking) {
-        FILE *dep = fopen(dep_file, "r");
-        if (dep) {
-            char linebuf[1024];
-            char *deps = NULL;
-            size_t deps_len = 0;
-            while (fgets(linebuf, sizeof(linebuf), dep)) {
-                size_t len = strlen(linebuf);
-                if (len > 0 && linebuf[len-1] == '\n') {
-                    linebuf[len-1] = '\0';
-                    --len;
-                }
-                int continued = 0;
-                if (len > 0 && linebuf[len-1] == '\\') {
-                    continued = 1;
-                    linebuf[len-1] = '\0';
-                    --len;
-                }
-                deps = (char*) realloc(deps, deps_len + len + 1);
-                if (!deps) {
-                    fclose(dep);
-                    return 1;
-                }
-                memcpy(deps + deps_len, linebuf, len);
-                deps_len += len;
-                deps[deps_len] = '\0';
-                if (!continued) {
-                }
-            }
-            fclose(dep);
-            if (deps) {
-                char *colon = strchr(deps, ':');
-                if (colon) {
-                    colon++;
-                    while (*colon == ' ' || *colon == '\t') colon++;
-                } else {
-                    colon = deps;
-                }
-                char *token = colon;
-                while (*token) {
-                    if (*token == ' ' || *token == '\t') {
-                        token++;
-                        continue;
-                    }
-                    if (*token == '\\') {
-                        if (*(token+1) == ' ') {
-                            memmove(token, token+1, strlen(token));
-                            continue;
-                        }
-                    }
-                    char *end = token;
-                    while (*end && *end != ' ' && *end != '\t') {
-                        if (*end == '\\' && *(end+1) == ' ') {
-                            end++;
-                        }
-                        end++;
-                    }
-                    char saved = *end;
-                    *end = '\0';
-                    const char *dep_path = token;
-                    if (strcmp(dep_path, src_file) != 0) {
-                        struct stat st_dep;
-                        if (stat(dep_path, &st_dep) == 0) {
-                            if (st_dep.st_mtime > st_obj.st_mtime) {
-                                free(deps);
-                                return 1;
-                            }
-                        } else {
-                            free(deps);
-                            return 1;
-                        }
-                    }
-                    *end = saved;
-                    token = end;
-                }
-                free(deps);
-            }
-        }
-    }
     return 0;
 }
 
@@ -1016,10 +935,6 @@ static int compile_source(const char *src_file, const char *obj_file, const char
     append_str(&cmd, "/showIncludes ");
 #else
     append_format(&cmd, "-c -o \"%s\" ", obj_file);
-    // Only add dependency flags if enabled
-    if (g_dep_tracking) {
-        append_format(&cmd, "-MMD -MF \"%s\" ", dep_file);
-    }
 #endif
     if (g_global_cflags) {
         append_format(&cmd, "%s ", g_global_cflags);
@@ -1305,10 +1220,6 @@ void cbuild_add_global_cflags(const char *flags) {
 
 void cbuild_add_global_ldflags(const char *flags) {
     append_format(&g_global_ldflags, "%s ", flags);
-}
-
-void cbuild_enable_dep_tracking(int enabled) {
-    g_dep_tracking = enabled;
 }
 
 /* Static variables for DFS build function */
