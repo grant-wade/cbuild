@@ -156,6 +156,9 @@ void cbuild_target_link_library(target_t *dependant, target_t *dependency);
 /** Add a command as a dependency of a target (runs before the target is built). */
 void cbuild_target_add_command(target_t *target, command_t *cmd);
 
+/** Override global CFLAGS for this target */
+void cbuild_target_add_cflags(target_t *target, const char *cflags);
+
 /* --- Public API: Global Build Settings --- */
 
 /** Set a custom output directory for all build artifacts (object files, libs, executables).
@@ -936,11 +939,10 @@ static int compile_source(const char *src_file, const char *obj_file, const char
 #else
     append_format(&cmd, "-c -o \"%s\" ", obj_file);
 #endif
-    if (g_global_cflags) {
-        append_format(&cmd, "%s ", g_global_cflags);
-    }
-    if (t->cflags) {
+    if (t->cflags && strlen(t->cflags) > 0) {
         append_format(&cmd, "%s ", t->cflags);
+    } else if (g_global_cflags) {
+        append_format(&cmd, "%s ", g_global_cflags);
     }
     for (int i = 0; i < t->include_count; ++i) {
         const char *inc = t->include_dirs[i];
@@ -1027,6 +1029,21 @@ void cbuild_target_add_command(target_t *target, command_t *cmd) {
     if (!target || !cmd) return;
     ensure_capacity_charpp((char***)&target->commands, &target->cmd_count, &target->cmd_cap);
     target->commands[target->cmd_count++] = cmd;
+}
+
+void cbuild_target_add_cflags(target_t* target, const char* cflags) {
+    if (!target || !cflags) return;
+
+    // If target doesn't have cflags yet, initialize with the provided flags
+    if (!target->cflags) {
+        target->cflags = strdup(cflags);
+    } else {
+        // Otherwise append the new flags with a space separator
+        char* new_cflags = (char*)malloc(strlen(target->cflags) + strlen(cflags) + 2);
+        sprintf(new_cflags, "%s %s", target->cflags, cflags);
+        free(target->cflags);
+        target->cflags = new_cflags;
+    }
 }
 
 void cbuild_target_add_post_command(target_t *target, command_t *cmd) {
