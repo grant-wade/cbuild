@@ -35,18 +35,22 @@ int main(int argc, char** argv) {
     // Define targets
     target_t* my_lib;
     CBUILD_STATIC_LIBRARY(my_lib,
-        CBUILD_SOURCES(my_lib, "src/lib.c", "include/lib.h");
+        CBUILD_SOURCES(my_lib, "src/*.c");
         CBUILD_INCLUDES(my_app, "include");
     );
 
     target_t* my_app;
     CBUILD_EXECUTABLE(my_app,
-        CBUILD_SOURCES(my_app, "src/main.c");
+        CBUILD_SOURCES(my_app, "main.c");
         CBUILD_INCLUDES(my_app, "include");
     );
 
     // Link libraries
     cbuild_target_link_library(my_app, my_lib);
+
+    // Setup subcommands (name, target, [optional: command], [optional: callback], [optional: args])
+    // can be invoked with ./cbuild run
+    cbuild_register_subcommand("run", my_app, "./build/my_app", NULL, NULL)
 
     // Run the build
     return cbuild_run(argc, argv);
