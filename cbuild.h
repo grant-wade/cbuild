@@ -288,22 +288,22 @@ void cbuild_register_subcommand(const char *name, target_t *target, const char *
 // Define an executable target with sources, includes, lib dirs, and libs
 #define CBUILD_EXECUTABLE(NAME, ...)                               \
   do {                                                             \
-    NAME = cbuild_executable(#NAME);                     \
-    __VA_ARGS__                                                   \
+    NAME = cbuild_executable(#NAME);                               \
+    __VA_ARGS__                                                    \
   } while(0)
 
 // Define a static library target with sources
 #define CBUILD_STATIC_LIBRARY(NAME, ...)                           \
   do {                                                             \
-    NAME = cbuild_static_library(#NAME);                 \
-    __VA_ARGS__                                                   \
+    NAME = cbuild_static_library(#NAME);                           \
+    __VA_ARGS__                                                    \
   } while(0)
 
 // Define a shared library target with sources
 #define CBUILD_SHARED_LIBRARY(NAME, ...)                           \
   do {                                                             \
-    NAME = cbuild_shared_library(#NAME);                 \
-    __VA_ARGS__                                                   \
+    NAME = cbuild_shared_library(#NAME);                           \
+    __VA_ARGS__                                                    \
   } while(0)
 
 
@@ -670,6 +670,13 @@ int cbuild_remove_dir(const char *path) {
 #endif
 }
 
+// Public Helper: get the current working directory
+int cbuild_get_cwd(char *buf, long size) {
+    if (!buf || size <= 0) return -1;
+    return getcwd(buf, size) ? 0 : -1;
+}
+
+
 /**
  * Simple wildcard pattern matching function.
  *
@@ -891,12 +898,6 @@ static int cbuild_expand_wildcard_recursive(const char *dir_path, const char *pa
 
     closedir(dir);
     return 0;
-}
-
-// Public Helper: get the current working directory
-int cbuild_get_cwd(char *buf, long size) {
-    if (!buf || size <= 0) return -1;
-    return getcwd(buf, size) ? 0 : -1;
 }
 
 // Helper: join two paths with a slash
