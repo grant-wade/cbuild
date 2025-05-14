@@ -562,6 +562,10 @@ static void remove_file(const char *path);
 static void remove_dir_recursive(const char *path);
 static void schedule_compile_jobs(target_t *t, int *error_flag);
 static void build_target(target_t *t, int *error_flag);
+static int cbuild_match_wildcard(const char *pattern, const char *string);
+static int cbuild_expand_wildcard(const char *pattern, char ***files, int *file_count);
+static int cbuild_expand_wildcard_recursive(const char *dir_path, const char *pattern, char ***files, int *file_count, int *capacity);
+static int cbuild_add_to_file_list(char ***files, int *file_count, int *capacity, const char *path);
 
 /* Structures and funcs for thread pool (for parallel compilation) */
 #ifdef _WIN32
@@ -664,6 +668,229 @@ int cbuild_remove_dir(const char *path) {
     closedir(dir);
     return rmdir(path);
 #endif
+}
+
+/**
+ * Simple wildcard pattern matching function.
+ *
+ * @param pattern The pattern to match against (supports * and ? wildcards)
+ * @param string  The string to check
+ * @return        1 if the string matches the pattern, 0 otherwise
+ *
+ * Supports:
+ *   - * (match 0 or more characters)
+ *   - ? (match any single character)
+ */
+static int cbuild_match_wildcard(const char *pattern, const char *string) {
+    if (!pattern || !string) return 0;
+
+    // End of pattern reached
+    if (*pattern == '\0') return *string == '\0';
+
+    // Handle wildcard *
+    if (*pattern == '*') {
+        // Skip consecutive * characters (but not ** which has special meaning)
+        if (*(pattern + 1) == '*' && *(pattern + 2) != '*') pattern++;
+
+        // * at the end of the pattern matches anything
+        if (*(pattern + 1) == '\0') return 1;
+
+        // Try to match the rest of the pattern with every substring
+        while (*string) {
+            if (cbuild_match_wildcard(pattern + 1, string)) return 1;
+            string++;
+        }
+        return cbuild_match_wildcard(pattern + 1, string);
+    }
+
+    // Handle ? or exact match
+    if (*pattern == '?' || *pattern == *string) {
+        return cbuild_match_wildcard(pattern + 1, string + 1);
+    }
+
+    return 0;
+}
+
+/**
+ * Helper functions for recursive pattern matching and file expansion
+ */
+
+/**
+ * Expands a wildcard pattern to a list of matching files.
+ *
+ * @param pattern    The pattern to expand (e.g. "src/*.c" or "src/**'/*.c")
+ * @param files      Output pointer to array of strings that will be filled with matching files
+ * @param file_count Output pointer to an integer that will be set to the number of files found
+ * @return           0 on success or -1 on error
+ *
+ * Supports:
+ *   - Basic wildcards: "src/*.c" matches all .c files in src directory
+ *   - Recursive wildcards: "src/**'/*.c" matches all .c files in src and all subdirectories
+ */
+static int cbuild_expand_wildcard(const char *pattern, char ***files, int *file_count) {
+    char dir_path[PATH_MAX] = {0};
+    char base_pattern[PATH_MAX] = {0};
+    int capacity = 32; // Initial capacity
+
+    if (!pattern || !files || !file_count) return -1;
+
+    *files = NULL;
+    *file_count = 0;
+
+    // Extract directory part and filename pattern
+    const char *last_slash = strrchr(pattern, '/');
+    const char *last_backslash = strrchr(pattern, '\\');
+    const char *separator = last_slash ? last_slash : last_backslash;
+
+    if (!separator) {
+        // No directory part, use current directory
+        strcpy(dir_path, ".");
+        strcpy(base_pattern, pattern);
+    } else {
+        // Extract directory part
+        size_t dir_len = separator - pattern;
+        strncpy(dir_path, pattern, dir_len);
+        dir_path[dir_len] = '\0';
+
+        // Extract base pattern
+        strcpy(base_pattern, separator + 1);
+    }
+
+    // Allocate memory for file list
+    *files = (char **)malloc(capacity * sizeof(char *));
+    if (!*files) return -1;
+
+    // Begin recursive expansion from the base directory
+    int result = cbuild_expand_wildcard_recursive(dir_path, base_pattern, files, file_count, &capacity);
+
+    if (result != 0 && *files) {
+        // Clean up on error
+        for (int i = 0; i < *file_count; i++) {
+            free((*files)[i]);
+        }
+        free(*files);
+        *files = NULL;
+        *file_count = 0;
+    }
+
+    return result;
+}
+
+/**
+ * Helper function to add a file to the result list.
+ * Handles memory allocation and growth of the file list array.
+ *
+ * @param files      Pointer to the array of file paths
+ * @param file_count Pointer to the current count of files
+ * @param capacity   Pointer to the current capacity of the array
+ * @param path       The file path to add to the list
+ * @return           0 on success, -1 on failure
+ */
+static int cbuild_add_to_file_list(char ***files, int *file_count, int *capacity, const char *path) {
+    // Grow array if needed
+    if (*file_count >= *capacity) {
+        *capacity *= 2;
+        char **new_files = (char **)realloc(*files, *capacity * sizeof(char *));
+        if (!new_files) {
+            return -1;
+        }
+        *files = new_files;
+    }
+
+    // Add path to the result
+    (*files)[*file_count] = strdup(path);
+    if (!(*files)[*file_count]) {
+        return -1;
+    }
+    (*file_count)++;
+
+    return 0;
+}
+
+/**
+ * Recursively expands wildcard patterns and handles ** for directory traversal.
+ * This is the workhorse function that handles directory traversal and pattern matching.
+ *
+ * @param dir_path   The directory to search in
+ * @param pattern    The pattern to match against files (can include subdirectory parts)
+ * @param files      Pointer to the array of file paths
+ * @param file_count Pointer to the current count of files
+ * @param capacity   Pointer to the current capacity of the array
+ * @return           0 on success, -1 on failure
+ */
+static int cbuild_expand_wildcard_recursive(const char *dir_path, const char *pattern, char ***files, int *file_count, int *capacity) {
+    DIR *dir;
+    struct dirent *entry;
+
+    // Handle special case for ** pattern
+    int recursive_search = 0;
+    char next_pattern[PATH_MAX] = {0};
+
+    if (strncmp(pattern, "**", 2) == 0) {
+        recursive_search = 1;
+
+        // Extract the rest of the pattern after **
+        if (pattern[2] == '/' || pattern[2] == '\\') {
+            strcpy(next_pattern, pattern + 3);
+        } else {
+            strcpy(next_pattern, pattern + 2);
+        }
+    }
+
+    // Open directory
+    dir = opendir(dir_path);
+    if (!dir) {
+        return -1;
+    }
+
+    // Read directory entries and check for matches
+    while ((entry = readdir(dir))) {
+        // Skip "." and ".." entries
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+
+        // Construct the full path
+        char full_path[PATH_MAX];
+        if (strcmp(dir_path, ".") == 0) {
+            snprintf(full_path, sizeof(full_path), "%s", entry->d_name);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        }
+
+        // Check if this is a directory
+        struct stat st;
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (recursive_search) {
+                // For ** pattern, process files in this directory with the remaining pattern
+                if (next_pattern[0]) {
+                    cbuild_expand_wildcard_recursive(full_path, next_pattern, files, file_count, capacity);
+                }
+
+                // Also search subdirectories with the original ** pattern
+                cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count, capacity);
+            } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {
+                // Handle directory/pattern format by traversing to subdirectory
+                const char *slash = strchr(pattern, '/');
+                if (!slash) slash = strchr(pattern, '\\');
+
+                char subdir_pattern[PATH_MAX] = {0};
+                strncpy(subdir_pattern, pattern, slash - pattern);
+                subdir_pattern[slash - pattern] = '\0';
+
+                if (cbuild_match_wildcard(subdir_pattern, entry->d_name)) {
+                    cbuild_expand_wildcard_recursive(full_path, slash + 1, files, file_count, capacity);
+                }
+            }
+        } else if (!recursive_search && cbuild_match_wildcard(pattern, entry->d_name)) {
+            // Check if this entry matches the pattern (for files)
+            if (cbuild_add_to_file_list(files, file_count, capacity, full_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        }
+    }
+
+    closedir(dir);
+    return 0;
 }
 
 // Public Helper: get the current working directory
@@ -1182,23 +1409,99 @@ target_t* cbuild_shared_library(const char *name) {
 }
 
 void cbuild_add_source(target_t *target, const char *source_file) {
-    ensure_capacity_charpp(&target->sources, &target->sources_count, &target->sources_cap);
-    target->sources[target->sources_count++] = strdup(source_file);
+    if (strchr(source_file, '*') || strchr(source_file, '?')) {
+        // This is a wildcard pattern
+        char **expanded_files = NULL;
+        int file_count = 0;
+
+        if (cbuild_expand_wildcard(source_file, &expanded_files, &file_count) == 0 && file_count > 0) {
+            for (int i = 0; i < file_count; i++) {
+                ensure_capacity_charpp(&target->sources, &target->sources_count, &target->sources_cap);
+                target->sources[target->sources_count++] = expanded_files[i]; // Transfer ownership
+            }
+            free(expanded_files); // Just free the array, not the strings
+        } else {
+            fprintf(stderr, "Warning: No files found matching pattern '%s'\n", source_file);
+        }
+    } else {
+        // Regular file path
+        ensure_capacity_charpp(&target->sources, &target->sources_count, &target->sources_cap);
+        target->sources[target->sources_count++] = strdup(source_file);
+    }
 }
 
-void cbuild_add_include_dir(target_t *target, const char *include_path) {
-    ensure_capacity_charpp(&target->include_dirs, &target->include_count, &target->include_cap);
-    target->include_dirs[target->include_count++] = strdup(include_path);
+void cbuild_add_include_dir(target_t *target, const char *include_dir) {
+    if (strchr(include_dir, '*') || strchr(include_dir, '?')) {
+        // This is a wildcard pattern
+        char **expanded_dirs = NULL;
+        int dir_count = 0;
+
+        if (cbuild_expand_wildcard(include_dir, &expanded_dirs, &dir_count) == 0 && dir_count > 0) {
+            for (int i = 0; i < dir_count; i++) {
+                if (cbuild_dir_exists(expanded_dirs[i])) {
+                    ensure_capacity_charpp(&target->include_dirs, &target->include_count, &target->include_cap);
+                    target->include_dirs[target->include_count++] = expanded_dirs[i]; // Transfer ownership
+                } else {
+                    free(expanded_dirs[i]); // Not a directory, free it
+                }
+            }
+            free(expanded_dirs); // Just free the array
+        } else {
+            fprintf(stderr, "Warning: No directories found matching pattern '%s'\n", include_dir);
+        }
+    } else {
+        // Regular directory path
+        ensure_capacity_charpp(&target->include_dirs, &target->include_count, &target->include_cap);
+        target->include_dirs[target->include_count++] = strdup(include_dir);
+    }
 }
 
 void cbuild_add_library_dir(target_t *target, const char *lib_dir) {
-    ensure_capacity_charpp(&target->lib_dirs, &target->lib_dir_count, &target->lib_dir_cap);
-    target->lib_dirs[target->lib_dir_count++] = strdup(lib_dir);
+    if (strchr(lib_dir, '*') || strchr(lib_dir, '?')) {
+        // This is a wildcard pattern
+        char **expanded_dirs = NULL;
+        int dir_count = 0;
+
+        if (cbuild_expand_wildcard(lib_dir, &expanded_dirs, &dir_count) == 0 && dir_count > 0) {
+            for (int i = 0; i < dir_count; i++) {
+                if (cbuild_dir_exists(expanded_dirs[i])) {
+                    ensure_capacity_charpp(&target->lib_dirs, &target->lib_dir_count, &target->lib_dir_cap);
+                    target->lib_dirs[target->lib_dir_count++] = expanded_dirs[i]; // Transfer ownership
+                } else {
+                    free(expanded_dirs[i]); // Not a directory, free it
+                }
+            }
+            free(expanded_dirs); // Just free the array
+        } else {
+            fprintf(stderr, "Warning: No directories found matching pattern '%s'\n", lib_dir);
+        }
+    } else {
+        // Regular directory path
+        ensure_capacity_charpp(&target->lib_dirs, &target->lib_dir_count, &target->lib_dir_cap);
+        target->lib_dirs[target->lib_dir_count++] = strdup(lib_dir);
+    }
 }
 
-void cbuild_add_link_library(target_t *target, const char *lib_name) {
-    ensure_capacity_charpp(&target->link_libs, &target->link_lib_count, &target->link_lib_cap);
-    target->link_libs[target->link_lib_count++] = strdup(lib_name);
+void cbuild_add_link_library(target_t *target, const char *lib) {
+    if (strchr(lib, '*') || strchr(lib, '?')) {
+        // This is a wildcard pattern
+        char **expanded_files = NULL;
+        int file_count = 0;
+
+        if (cbuild_expand_wildcard(lib, &expanded_files, &file_count) == 0 && file_count > 0) {
+            for (int i = 0; i < file_count; i++) {
+                ensure_capacity_charpp(&target->link_libs, &target->link_lib_count, &target->link_lib_cap);
+                target->link_libs[target->link_lib_count++] = expanded_files[i]; // Transfer ownership
+            }
+            free(expanded_files); // Just free the array
+        } else {
+            fprintf(stderr, "Warning: No libraries found matching pattern '%s'\n", lib);
+        }
+    } else {
+        // Regular library path
+        ensure_capacity_charpp(&target->link_libs, &target->link_lib_count, &target->link_lib_cap);
+        target->link_libs[target->link_lib_count++] = strdup(lib);
+    }
 }
 
 void cbuild_target_link_library(target_t *dependant, target_t *dependency) {

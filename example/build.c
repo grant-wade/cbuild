@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
   target_t *math_lib = cbuild_subproject_get_target(math, "math");
   target_t *main;
   CBUILD_EXECUTABLE(main, CBUILD_SOURCES(main, "main.c");
-                    CBUILD_INCLUDES(main, "lib"););
+                    CBUILD_INCLUDES(main, "lib/src"););
   cbuild_target_link_library(main, math_lib);
   return cbuild_run(argc, argv);
 }
