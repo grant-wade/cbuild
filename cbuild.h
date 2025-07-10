@@ -1,73 +1,39 @@
 /*
 ------------------------------------------------------------------------------
-cbuild.h - Minimal C build system as a C header library
+cbuild.h - Minimal, cross-platform, header-only C build system
 
-Why cbuild.h?
--------------
-cbuild.h lets you describe your C build in C code, not in Makefiles or shell
-scripts.
-- Write your build logic in C, with full language power (loops, conditionals,
-variables).
-- Cross-platform: works on Windows, macOS, Linux.
-- No dependencies: just a single header, no Python, no Lua, no external tools.
-- Fast incremental builds: only rebuilds what changed.
-- Supports parallel compilation, (dependency tracking, probably broken), custom
-commands, and subcommands.
+Copyright (c) 2025 Grant Wade
 
-Typical Use Case:
------------------
-- You want a simple, portable build for a C project.
-- You want to avoid the complexity of Make, CMake, or scripting languages.
-- You want to keep your build logic versioned and hackable in C.
+1. Purpose
+----------
+A minimal, cross-platform, header-only build system for C projects. 
+Write your build logic directly in C, enabling full language power 
+and portability without external tools or scripts.
 
-How to Use:
------------
-1. Write a `build.c` file that includes and implements cbuild.h:
+2. Key Features
+---------------
+- Target management: executables, static/shared libraries, custom commands
+- Dependency handling: tracks source/header changes, supports incremental builds
+- Source/include/library management: add sources, includes, libraries (wildcards supported)
+- Custom build logic: subcommands, pre/post build steps, user callbacks
+- Incremental builds: only rebuilds what has changed
+- Self-rebuilding: build executable can auto-rebuild when sources change
+- Subproject support: build and link subprojects, fetch targets from other cbuild projects
+- Compile_commands.json: optional generation for IDE tooling
+- Macro helpers: batch add sources/includes/defines, target definition macros
+- Platform abstraction: works on Windows, macOS, Linux
 
-    #define CBUILD_IMPLEMENTATION
-    #include "cbuild.h"
+3. Supported Build Configurations
+---------------------------------
+- Debug/release and custom flags per target or globally
+- Platform-specific output and compiler/linker flags
+- Compiler selection (gcc, clang, cl, etc.)
+- Feature flags and preprocessor defines (per-target and global)
+- Parallelism control (auto-detects CPU count, overrideable)
+- Dependency tracking (optional, .d file support)
 
-2. Describe your build targets in C:
-
-    target_t* mylib = cbuild_static_library("mylib");
-    cbuild_add_source(mylib, "src/foo.c");
-    cbuild_add_include_dir(mylib, "include");
-
-    target_t* app = cbuild_executable("myapp");
-    cbuild_add_source(app, "src/main.c");
-    cbuild_target_link_library(app, mylib);
-
-3. Optionally, add custom commands or subcommands:
-
-    cbuild_register_subcommand("test", app, "./build/myapp --run-tests", NULL,
-NULL);
-
-4. In your main(), call cbuild_run(argc, argv):
-
-    int main(int argc, char** argv) {
-        cbuild_set_output_dir("build");
-        // ... define targets ...
-        return cbuild_run(argc, argv);
-    }
-
-5. Build your project:
-
-    $ gcc build.c -o cbuild
-    $ ./cbuild           # builds all targets
-    $ ./cbuild clean     # cleans build outputs
-    $ ./cbuild myapp     # builds only 'myapp' and its dependencies
-    $ ./cbuild test      # builds 'app' and runs the test subcommand
-
-Self-Rebuilding:
+4. Usage Example
 ----------------
-If you want your build executable to auto-rebuild itself when build.c or
-cbuild.h changes, call cbuild_self_rebuild_if_needed() at the start of main():
-
-    const char* self_sources[] = {"build.c", "cbuild.h"};
-    cbuild_self_rebuild_if_needed(argc, argv, self_sources, 2);
-
-Example:
---------
     #define CBUILD_IMPLEMENTATION
     #include "cbuild.h"
 
@@ -81,11 +47,65 @@ Example:
         return cbuild_run(argc, argv);
     }
 
-Inspirations:
-- nob.h - https://github.com/tsoding/nob.h
-- tup   - https://github.com/gittup/tup
-- make? lol
+Typical build commands:
+    $ gcc build.c -o cbuild
+    $ ./cbuild           # builds all targets
+    $ ./cbuild clean     # cleans build outputs
+    $ ./cbuild bar       # builds only 'bar' and its dependencies
 
+5. Dependencies & Integration Notes
+-----------------------------------
+- No external dependencies: single header, ANSI C, no Python/Lua/tools required
+- Integrate by including in your build.c and defining CBUILD_IMPLEMENTATION in one file
+- Subproject support: build and link other cbuild-based projects
+- Platform headers: handles Windows, macOS, Linux specifics internally
+- Self-rebuild: call cbuild_self_rebuild_if_needed() or use CBUILD_SELF_REBUILD macro
+
+6. Notable Macros & API
+-----------------------
+- CBUILD_IMPLEMENTATION: place in one .c file to enable implementation
+- CBUILD_SELF_REBUILD(...): auto-rebuild build executable if sources change
+- CBUILD_SOURCES, CBUILD_INCLUDES, CBUILD_LIB_DIRS, CBUILD_LINK_LIBS: batch add helpers
+- CBUILD_EXECUTABLE, CBUILD_STATIC_LIBRARY, CBUILD_SHARED_LIBRARY: target definition helpers
+- CBUILD_DEFINES: batch add preprocessor macros
+- CBUILD_SUBPROJECT: declare and initialize subprojects
+
+7. Documentation
+----------------
+- Doxygen-style comments and usage instructions are provided throughout this header.
+- See function and macro documentation below for details.
+
+8. License
+----------
+BSD 3-Clause License
+
+Copyright (c) 2025 Grant Wade
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ------------------------------------------------------------------------------
 */
 
@@ -96,202 +116,418 @@ Inspirations:
 extern "C" {
 #endif
 
-/* Opaque handle for build targets (forward declaration) */
+/**
+ * @typedef target_t
+ * @brief Opaque handle representing a build target (executable or library).
+ */
 typedef struct cbuild_target target_t;
 
-/* Opaque handle for build commands (forward declaration) */
+/**
+ * @typedef command_t
+ * @brief Opaque handle representing a build command to be executed.
+ */
 typedef struct cbuild_command command_t;
 
-/* Opaque handle for subprojects (forward declaration) */
+/**
+ * @typedef subproject_t
+ * @brief Opaque handle representing a subproject within the build system.
+ */
 typedef struct cbuild_subproject subproject_t;
 
-/* Subcommand callback definition */
+/**
+ * @brief Callback type for custom subcommands.
+ * @param user_data Pointer to user-defined data passed to the callback.
+ */
 typedef void (*cbuild_subcommand_callback)(void *user_data);
 
-/* --- Public API: Target Creation --- */
-
-/** Create a new executable target with the given name (no file extension
- * needed). */
+/**
+ * @brief Create a new executable build target.
+ *
+ * @param name Name of the executable target (no file extension needed).
+ * @return Pointer to the created target object.
+ */
 target_t *cbuild_executable(const char *name);
 
-/** Create a new static library target with the given name. (On Unix, 'lib'
- * prefix and .a will be added) */
+/**
+ * @brief Create a new static library build target.
+ *
+ * On Unix, the 'lib' prefix and .a extension will be added automatically.
+ *
+ * @param name Name of the static library target.
+ * @return Pointer to the created target object.
+ */
 target_t *cbuild_static_library(const char *name);
 
-/** Create a new shared library target with the given name. (Adds .dll, .so, or
- * .dylib extension as appropriate) */
+/**
+ * @brief Create a new shared library build target.
+ *
+ * Adds the appropriate extension (.dll, .so, or .dylib) based on the platform.
+ *
+ * @param name Name of the shared library target.
+ * @return Pointer to the created target object.
+ */
 target_t *cbuild_shared_library(const char *name);
 
-/* --- Public API: Command Creation and Execution --- */
-
-/** Create a shell command to be run as part of the build graph.
-    The command string is executed as-is by the shell. */
+/**
+ * @brief Create a shell command to be run as part of the build graph.
+ *
+ * The command string is executed as-is by the shell.
+ *
+ * @param name Name of the command.
+ * @param command_line Shell command to execute.
+ * @return Pointer to the created command object.
+ */
 command_t *cbuild_command(const char *name, const char *command_line);
 
-/** Add a command as a dependency of a target (runs before the target is built).
+/**
+ * @brief Add a command as a dependency of a target.
+ *
+ * The command will run before the target is built.
+ *
+ * @param target Target to add the command dependency to.
+ * @param cmd Command to add as a dependency.
  */
 void cbuild_target_add_command(target_t *target, command_t *cmd);
 
-/** Add a command as a dependency of another command (runs before the command).
+/**
+ * @brief Add a command as a dependency of another command.
+ *
+ * The dependency command will run before the main command.
+ *
+ * @param cmd Command to add the dependency to.
+ * @param dependency Command to add as a dependency.
  */
 void cbuild_command_add_dependency(command_t *cmd, command_t *dependency);
 
-/** Run a command immediately (not as part of the build graph). Returns 0 on
- * success. */
+/**
+ * @brief Run a command immediately (not as part of the build graph).
+ *
+ * @param cmd Command to run.
+ * @return 0 on success, nonzero on failure.
+ */
 int cbuild_run_command(command_t *cmd);
 
-/** Add a command to be run after the target is built (post-build step). */
+/**
+ * @brief Add a command to be run after the target is built (post-build step).
+ *
+ * @param target Target to add the post-build command to.
+ * @param cmd Command to run after the target is built.
+ */
 void cbuild_target_add_post_command(target_t *target, command_t *cmd);
 
-/* --- Public API: Modifying Targets --- */
-
-/** Add a source file to a target. The source file can be C (or C++) source
- * code. */
+/**
+ * @brief Add a source file to a target.
+ *
+ * The source file can be C or C++ source code. Wildcards are supported.
+ *
+ * @param target Target to add the source file to.
+ * @param source_file Path to the source file.
+ */
 void cbuild_add_source(target_t *target, const char *source_file);
 
-/** Add an include directory for a target (passed to compiler as -I or /I). */
+/**
+ * @brief Add an include directory for a target.
+ *
+ * The directory is passed to the compiler as -I or /I.
+ *
+ * @param target Target to add the include directory to.
+ * @param include_path Path to the include directory.
+ */
 void cbuild_add_include_dir(target_t *target, const char *include_path);
 
-/** Add a library search directory for a target's link phase (passed to linker
- * as -L or /LIBPATH). */
+/**
+ * @brief Add a library search directory for a target's link phase.
+ *
+ * The directory is passed to the linker as -L or /LIBPATH.
+ *
+ * @param target Target to add the library directory to.
+ * @param lib_dir Path to the library directory.
+ */
 void cbuild_add_library_dir(target_t *target, const char *lib_dir);
 
-/** Link an external library to a target by name.
-    For GCC/Clang, use names like "m" for math (adds -lm).
-    For MSVC, use library base name (e.g., "User32" for User32.lib). */
+/**
+ * @brief Link an external library to a target by name.
+ *
+ * For GCC/Clang, use names like "m" for math (adds -lm).
+ * For MSVC, use the library base name (e.g., "User32" for User32.lib).
+ *
+ * @param target Target to link the library to.
+ * @param lib_name Name of the library to link.
+ */
 void cbuild_add_link_library(target_t *target, const char *lib_name);
 
-/** Declare that target `dependant` links against target `dependency`.
-    This means `dependency` will be built first, and the output library will be
-   linked into `dependant`. */
+/**
+ * @brief Declare that one target links against another target.
+ *
+ * The dependency target will be built first, and its output will be linked into the dependant.
+ *
+ * @param dependant Target that depends on the other.
+ * @param dependency Target to be linked as a dependency.
+ */
 void cbuild_target_link_library(target_t *dependant, target_t *dependency);
 
-/** Add a command as a dependency of a target (runs before the target is built).
+/**
+ * @brief Override global CFLAGS for a specific target.
+ *
+ * @param target Target to set custom CFLAGS for.
+ * @param cflags Compiler flags to use for this target.
  */
-void cbuild_target_add_command(target_t *target, command_t *cmd);
-
-/** Override global CFLAGS for this target */
 void cbuild_target_add_cflags(target_t *target, const char *cflags);
 
-/* --- Public API: Global Build Settings --- */
-
-/** Set a custom output directory for all build artifacts (object files, libs,
-   executables). Default is "build". */
+/**
+ * @brief Set a custom output directory for all build artifacts.
+ *
+ * This affects object files, libraries, and executables. Default is "build".
+ *
+ * @param dir Path to the output directory.
+ */
 void cbuild_set_output_dir(const char *dir);
 
-/** Set the number of parallel compile jobs. Default is number of CPU cores (at
- * least 1). */
+/**
+ * @brief Set the number of parallel compile jobs.
+ *
+ * Default is the number of CPU cores (at least 1).
+ *
+ * @param jobs_count Number of parallel jobs.
+ */
 void cbuild_set_parallelism(int jobs_count);
 
-/** Manually specify the C compiler to use (e.g., "gcc", "clang", "cl").
-    If not set, cbuild auto-detects or uses environment variable CC. */
+/**
+ * @brief Manually specify the C compiler to use.
+ *
+ * If not set, cbuild auto-detects or uses the environment variable CC.
+ *
+ * @param compiler_exe Name or path of the compiler executable (e.g., "gcc", "clang", "cl").
+ */
 void cbuild_set_compiler(const char *compiler_exe);
 
-/** Specify additional global compiler flags (applied to all targets). Optional.
+/**
+ * @brief Specify additional global compiler flags.
+ *
+ * These flags are applied to all targets. Optional.
+ *
+ * @param flags Compiler flags to add globally.
  */
 void cbuild_add_global_cflags(const char *flags);
 
-/** Specify additional global linker flags for executables/shared libs.
- * Optional. */
+/**
+ * @brief Specify additional global linker flags for executables/shared libraries.
+ *
+ * Optional.
+ *
+ * @param flags Linker flags to add globally.
+ */
 void cbuild_add_global_ldflags(const char *flags);
 
-/** Enable dependency tracking (header dependency detection and .d file
- * generation). Disabled by default. */
+/**
+ * @brief Enable or disable dependency tracking.
+ *
+ * Enables header dependency detection and .d file generation. Disabled by default.
+ *
+ * @param enabled Nonzero to enable, zero to disable.
+ */
 void cbuild_enable_dep_tracking(int enabled);
 
 /**
- * Checks if the running executable is out-of-date with respect to the given
- * sources. If so, moves itself to .old, rebuilds, and execs the new binary with
- * the same arguments. Call this at the start of main().
+ * @brief Automatically rebuild the build executable if any source files have changed.
+ *
+ * Checks if the running executable is out-of-date with respect to the given sources.
+ * If so, moves itself to .old, rebuilds, and execs the new binary with the same arguments.
+ * Call this at the start of main().
  *
  * @param argc main's argc
  * @param argv main's argv
- * @param sources array of source file paths (e.g. {"build.c", "cbuild.h"})
- * @param sources_count number of source files
+ * @param sources Array of source file paths (e.g. {"build.c", "cbuild.h"})
+ * @param sources_count Number of source files
  */
 void cbuild_self_rebuild_if_needed(int argc, char **argv, const char **sources,
                                    int sources_count);
 
-/** Enable or disable generation of compile_commands.json */
+/**
+ * @brief Enable or disable generation of compile_commands.json.
+ *
+ * @param enabled Nonzero to enable, zero to disable.
+ */
 void cbuild_enable_compile_commands(int enabled);
 
-/* --- Subproject API --- */
-
 /**
- * Declare a subproject.
- * @param alias      An arbitrary name for this project (used to scope its proxy
- * targets).
- * @param directory  Path to its root (where build.c lives).
+ * @brief Declare a subproject to be included in the build.
+ *
+ * @param alias      An arbitrary name for this project (used to scope its proxy targets).
+ * @param directory  Path to the subproject's root (where build.c lives).
  * @param cbuild_exe Path to the cbuild driver to invoke (usually "../cbuild").
- * @return           A subproject handle.
+ * @return           A handle to the subproject.
  */
 subproject_t *cbuild_add_subproject(const char *alias, const char *directory,
                                     const char *cbuild_exe);
 
 /**
- * Fetch one of the subproject’s built targets by name.
+ * @brief Fetch one of the subproject’s built targets by name.
+ *
  * This creates a proxy target_t* in the current graph which:
  *  - depends on the subproject build command
  *  - has its output_file set to the subproject’s artifact path
- *  - can be passed to cbuild_target_link_library(), cbuild_add_library_dir(),
- * etc.
- * @return NULL on error (no such target in the manifest).
+ *  - can be passed to cbuild_target_link_library(), cbuild_add_library_dir(), etc.
+ *
+ * @param sub      Subproject handle.
+ * @param tgt_name Name of the target to fetch from the subproject.
+ * @return         Proxy target handle, or NULL on error (no such target in the manifest).
  */
 target_t *cbuild_subproject_get_target(subproject_t *sub, const char *tgt_name);
 
-/* Convenience macro for subproject declaration */
+/**
+ * @def CBUILD_SUBPROJECT(ALIAS, DIR, EXE)
+ * @brief Convenience macro for declaring a subproject.
+ *
+ * Declares and initializes a subproject handle named ALIAS.
+ *
+ * @param ALIAS Variable name for the subproject handle.
+ * @param DIR   Path to the subproject directory.
+ * @param EXE   Path to the cbuild executable for the subproject.
+ */
 #define CBUILD_SUBPROJECT(ALIAS, DIR, EXE) \
     subproject_t *ALIAS = cbuild_add_subproject(#ALIAS, DIR, EXE)
 
-/* --- Public API: Build Execution --- */
-
-/** Execute the build. Call this in main() with the program arguments.
-    Recognized commands:
-      - no arguments: build all targets
-      - "clean": remove built files
-      - target name(s): build only those targets (and their dependencies)
-    Returns 0 on success, nonzero on failure. */
+/**
+ * @brief Execute the build process.
+ *
+ * Call this in main() with the program arguments.
+ * Recognized commands:
+ *   - no arguments: build all targets
+ *   - "clean": remove built files
+ *   - target name(s): build only those targets (and their dependencies)
+ *
+ * @param argc Argument count from main().
+ * @param argv Argument vector from main().
+ * @return 0 on success, nonzero on failure.
+ */
 int cbuild_run(int argc, char **argv);
 
-/* --- Public API: Custom Subcommands --- */
-
 /**
- * Register a custom subcommand.
- * @param name The subcommand name (e.g. "test")
- * @param target The target that must be built before the subcommand runs
- * @param command_line Shell command to run (optional, can be NULL if using
- * callback)
- * @param callback User callback function to run (optional, can be NULL if using
- * command_line)
- * @param user_data User data pointer passed to callback (can be NULL)
+ * @brief Register a custom subcommand for the build system.
+ *
+ * @param name         The subcommand name (e.g. "test").
+ * @param target       The target that must be built before the subcommand runs.
+ * @param command_line Shell command to run (optional, can be NULL if using callback).
+ * @param callback     User callback function to run (optional, can be NULL if using command_line).
+ * @param user_data    User data pointer passed to callback (can be NULL).
  */
 void cbuild_register_subcommand(const char *name, target_t *target,
                                 const char *command_line,
                                 cbuild_subcommand_callback callback,
                                 void *user_data);
 
-/* --- Public API: Pre‑processor defines --------------------------------- */
-
-/* Define MACRO                → -DMACRO           (or /DMACRO on MSVC)     */
+/**
+ * @brief Define a preprocessor macro for a specific target.
+ *
+ * Equivalent to passing -DMACRO (or /DMACRO on MSVC).
+ *
+ * @param target Target to add the macro to.
+ * @param macro  Macro name to define.
+ */
 void cbuild_add_define(target_t *target, const char *macro);
 
-/* Define MACRO=VALUE          → -DMACRO=VALUE     (/DMACRO=VALUE)          */
+/**
+ * @brief Define a preprocessor macro with a value for a specific target.
+ *
+ * Equivalent to passing -DMACRO=VALUE (or /DMACRO=VALUE on MSVC).
+ *
+ * @param target Target to add the macro to.
+ * @param macro  Macro name to define.
+ * @param value  Value to assign to the macro.
+ */
 void cbuild_add_define_val(target_t *target,
                            const char *macro,
                            const char *value);
 
-/* Toggle a boolean feature flag;                       */
-/* true  → -DFLAG=1 , false → -DFLAG=0                  */
+/**
+ * @brief Toggle a boolean feature flag for a target.
+ *
+ * true  → -DFLAG=1 , false → -DFLAG=0
+ *
+ * @param target Target to set the flag for.
+ * @param flag   Name of the flag.
+ * @param value  Boolean value (nonzero for true, zero for false).
+ */
 void cbuild_set_flag(target_t *target, const char *flag, int value);
 
-/* Global (all targets) variants: */
+/**
+ * @brief Define a global preprocessor macro for all targets.
+ *
+ * @param macro Macro name to define globally.
+ */
 void cbuild_add_global_define(const char *macro);
+
+/**
+ * @brief Define a global preprocessor macro with a value for all targets.
+ *
+ * @param macro Macro name to define globally.
+ * @param value Value to assign to the macro.
+ */
 void cbuild_add_global_define_val(const char *macro, const char *value);
+
+/**
+ * @brief Toggle a global boolean feature flag for all targets.
+ *
+ * @param flag  Name of the flag.
+ * @param value Boolean value (nonzero for true, zero for false).
+ */
 void cbuild_set_global_flag(const char *flag, int value);
 
-/* --- Public API Helper Macros for defining builds --- */
+/**
+ * @brief Check if a file exists.
+ *
+ * @param path Path to the file.
+ * @return 1 if the file exists, 0 otherwise.
+ */
+int cbuild_file_exists(const char *path);
 
-// Self‑rebuild if build.c or cbuild.h changes
+// Helper: check if a directory exists
+/**
+ * @brief Check if a directory exists.
+ *
+ * @param path Path to the directory.
+ * @return 1 if the directory exists, 0 otherwise.
+ */
+int cbuild_dir_exists(const char *path);
+
+// Helper: remove a file
+/**
+ * @brief Remove a file from the filesystem.
+ *
+ * @param path Path to the file.
+ * @return 0 on success, -1 on failure.
+ */
+int cbuild_remove_file(const char *path);
+
+// Helper: remove a directory recursively
+/**
+ * @brief Remove a directory and its contents recursively.
+ *
+ * @param path Path to the directory.
+ * @return 0 on success, -1 on failure.
+ */
+int cbuild_remove_dir(const char *path);
+
+// Helper: get the current working directory
+/**
+ * @brief Get the current working directory.
+ *
+ * @param buf  Buffer to store the current working directory path.
+ * @param size Size of the buffer.
+ * @return 0 on success, -1 on failure.
+ */
+int cbuild_get_cwd(char *buf, long size);
+
+
+/**
+ * @def CBUILD_SELF_REBUILD(...)
+ * @brief Macro to self-rebuild the build executable if any listed source files change.
+ *
+ * Expands to a call to cbuild_self_rebuild_if_needed() with the provided source files.
+ *
+ * @param ... List of source file paths (e.g., "build.c", "cbuild.h").
+ */
 #define CBUILD_SELF_REBUILD(...)                                              \
     do {                                                                      \
         const char *_srcs[] = { __VA_ARGS__ };                                \
@@ -299,7 +535,13 @@ void cbuild_set_global_flag(const char *flag, int value);
                                       (int)(sizeof(_srcs) / sizeof(*_srcs))); \
     } while (0)
 
-// Add multiple sources to a target
+/**
+ * @def CBUILD_SOURCES(TGT, ...)
+ * @brief Macro to add multiple source files to a target.
+ *
+ * @param TGT  Target to add sources to.
+ * @param ...  List of source file paths.
+ */
 #define CBUILD_SOURCES(TGT, ...)                                     \
     do {                                                             \
         const char *_a[] = { __VA_ARGS__ };                          \
@@ -307,7 +549,13 @@ void cbuild_set_global_flag(const char *flag, int value);
             cbuild_add_source(TGT, _a[_i]);                          \
     } while (0)
 
-// Add multiple include directories
+/**
+ * @def CBUILD_INCLUDES(TGT, ...)
+ * @brief Macro to add multiple include directories to a target.
+ *
+ * @param TGT  Target to add include directories to.
+ * @param ...  List of include directory paths.
+ */
 #define CBUILD_INCLUDES(TGT, ...)                                    \
     do {                                                             \
         const char *_a[] = { __VA_ARGS__ };                          \
@@ -315,7 +563,13 @@ void cbuild_set_global_flag(const char *flag, int value);
             cbuild_add_include_dir(TGT, _a[_i]);                     \
     } while (0)
 
-// Add multiple library directories
+/**
+ * @def CBUILD_LIB_DIRS(TGT, ...)
+ * @brief Macro to add multiple library directories to a target.
+ *
+ * @param TGT  Target to add library directories to.
+ * @param ...  List of library directory paths.
+ */
 #define CBUILD_LIB_DIRS(TGT, ...)                                    \
     do {                                                             \
         const char *_a[] = { __VA_ARGS__ };                          \
@@ -323,7 +577,13 @@ void cbuild_set_global_flag(const char *flag, int value);
             cbuild_add_library_dir(TGT, _a[_i]);                     \
     } while (0)
 
-// Link against multiple libraries
+/**
+ * @def CBUILD_LINK_LIBS(TGT, ...)
+ * @brief Macro to link multiple libraries to a target.
+ *
+ * @param TGT  Target to link libraries to.
+ * @param ...  List of library names or paths.
+ */
 #define CBUILD_LINK_LIBS(TGT, ...)                                   \
     do {                                                             \
         const char *_a[] = { __VA_ARGS__ };                          \
@@ -331,28 +591,52 @@ void cbuild_set_global_flag(const char *flag, int value);
             cbuild_add_link_library(TGT, _a[_i]);                    \
     } while (0)
 
-// Define an executable target with sources, includes, lib dirs, and libs
+/**
+ * @def CBUILD_EXECUTABLE(NAME, ...)
+ * @brief Macro to define an executable target with sources, includes, lib dirs, and libs.
+ *
+ * @param NAME Variable name for the target.
+ * @param ...  Additional build configuration statements.
+ */
 #define CBUILD_EXECUTABLE(NAME, ...)     \
     do {                                 \
         NAME = cbuild_executable(#NAME); \
         __VA_ARGS__                      \
     } while (0)
 
-// Define a static library target with sources
+/**
+ * @def CBUILD_STATIC_LIBRARY(NAME, ...)
+ * @brief Macro to define a static library target with sources.
+ *
+ * @param NAME Variable name for the target.
+ * @param ...  Additional build configuration statements.
+ */
 #define CBUILD_STATIC_LIBRARY(NAME, ...)     \
     do {                                     \
         NAME = cbuild_static_library(#NAME); \
         __VA_ARGS__                          \
     } while (0)
 
-// Define a shared library target with sources
+/**
+ * @def CBUILD_SHARED_LIBRARY(NAME, ...)
+ * @brief Macro to define a shared library target with sources.
+ *
+ * @param NAME Variable name for the target.
+ * @param ...  Additional build configuration statements.
+ */
 #define CBUILD_SHARED_LIBRARY(NAME, ...)     \
     do {                                     \
         NAME = cbuild_shared_library(#NAME); \
         __VA_ARGS__                          \
     } while (0)
 
-// macro for bulk defines, mirroring CBUILD_SOURCES & friends
+/**
+ * @def CBUILD_DEFINES(TGT, ...)
+ * @brief Macro to define multiple preprocessor macros for a target.
+ *
+ * @param TGT  Target to add macros to.
+ * @param ...  List of macro names.
+ */
 #define CBUILD_DEFINES(TGT, ...)                                           \
     do {                                                                   \
         const char *_defs[] = { __VA_ARGS__ };                             \
@@ -360,21 +644,6 @@ void cbuild_set_global_flag(const char *flag, int value);
             cbuild_add_define((TGT), _defs[_i]);                           \
     } while (0)
 
-/* --- Helpers and utils */
-// Helper: check if a file exists
-int cbuild_file_exists(const char *path);
-
-// Helper: check if a directory exists
-int cbuild_dir_exists(const char *path);
-
-// Helper: remove a file
-int cbuild_remove_file(const char *path);
-
-// Helper: remove a directory recursively
-int cbuild_remove_dir(const char *path);
-
-// Helper: get the current working directory
-int cbuild_get_cwd(char *buf, long size);
 
 #ifdef __cplusplus
 }
@@ -411,6 +680,10 @@ int cbuild_get_cwd(char *buf, long size);
 #include <limits.h>
 #include <pthread.h>
 #include <unistd.h>
+#endif
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096  // reasonable default for most systems
 #endif
 
 // --- Pretty-printing helpers (ANSI colors) ---
@@ -631,17 +904,18 @@ void cbuild_enable_compile_commands(int enabled) {
 /* Forward declarations of internal utility functions */
 static void cbuild_init();  // initialize defaults
 static target_t *cbuild_create_target(const char *name,
-                                      cbuild_target_type type);
+                                       cbuild_target_type type);
 static void ensure_capacity_charpp(char ***arr, int *count, int *capacity);
 static void append_str(char **dst, const char *src);
 static void append_format(char **dst, const char *fmt, ...);
 static int ensure_dir_exists(const char *path);
 static int run_command(const char *cmd, int capture_out,
-                       char **captured_output);
+                        char **captured_output);
 static int compile_source(const char *src_file, const char *obj_file,
-                          const char *dep_file, target_t *t);
+                           const char *dep_file, target_t *t);
+static void collect_compile_commands_for_target(target_t *t);
 static int need_recompile(const char *src_file, const char *obj_file,
-                          const char *dep_file);
+                           const char *dep_file);
 static int link_target(target_t *t);
 static void remove_file(const char *path);
 static void remove_dir_recursive(const char *path);
@@ -649,12 +923,12 @@ static void schedule_compile_jobs(target_t *t, int *error_flag);
 static void build_target(target_t *t, int *error_flag);
 static int cbuild_match_wildcard(const char *pattern, const char *string);
 static int cbuild_expand_wildcard(const char *pattern, char ***files,
-                                  int *file_count);
+                                   int *file_count);
 static int cbuild_expand_wildcard_recursive(const char *dir_path,
-                                            const char *pattern, char ***files,
-                                            int *file_count, int *capacity);
+                                             const char *pattern, char ***files,
+                                             int *file_count, int *capacity);
 static int cbuild_add_to_file_list(char ***files, int *file_count,
-                                   int *capacity, const char *path);
+                                    int *capacity, const char *path);
 
 /* Structures and funcs for thread pool (for parallel compilation) */
 #ifdef _WIN32
@@ -1353,21 +1627,6 @@ static int compile_source(const char *src_file, const char *obj_file,
 
     append_format(&cmd, "\"%s\"", src_file);
 
-    // Record compile command if enabled
-    if (g_generate_compile_commands) {
-        char cwd[PATH_MAX];
-        if (getcwd(cwd, sizeof(cwd))) {
-            if (g_cc_count + 1 > g_cc_cap) {
-                g_cc_cap = g_cc_cap ? g_cc_cap * 2 : 4;
-                g_cc_entries = realloc(g_cc_entries, g_cc_cap * sizeof(*g_cc_entries));
-            }
-            g_cc_entries[g_cc_count].directory = strdup(cwd);
-            g_cc_entries[g_cc_count].command = strdup(cmd);
-            g_cc_entries[g_cc_count].file = strdup(src_file);
-            g_cc_count++;
-        }
-    }
-
     int result;
     char *output = NULL;
 #ifdef _WIN32
@@ -1412,6 +1671,71 @@ static int compile_source(const char *src_file, const char *obj_file,
         fprintf(stderr, "cbuild: Compilation failed for %s\n", src_file);
     }
     return result;
+}
+
+/* Collect compile commands for all sources of a target (for compile_commands.json) */
+static void collect_compile_commands_for_target(target_t *t) {
+    if (!g_generate_compile_commands)
+        return;
+    for (int i = 0; i < t->sources_count; ++i) {
+        const char *src_file = t->sources[i];
+        const char *slash = strrchr(src_file, '/');
+        const char *base = slash ? slash + 1 : src_file;
+        char *dot = strrchr(base, '.');
+        size_t len = dot ? (size_t)(dot - base) : strlen(base);
+        char objname[512];
+        snprintf(objname, sizeof(objname), "%s/%.*s.o", t->obj_dir, (int)len, base);
+
+        char *cmd = NULL;
+        append_format(&cmd, "\"%s\" ", g_cc);
+    #ifdef _WIN32
+        append_format(&cmd, "/c /nologo /Fo\"%s\" ", objname);
+        append_str(&cmd, "/showIncludes ");
+    #else
+        append_format(&cmd, "-c -o \"%s\" ", objname);
+    #endif
+        if (t->cflags && strlen(t->cflags) > 0) {
+            append_format(&cmd, "%s ", t->cflags);
+        } else if (g_global_cflags) {
+            append_format(&cmd, "%s ", g_global_cflags);
+        }
+        for (int j = 0; j < t->include_count; ++j) {
+            const char *inc = t->include_dirs[j];
+        #ifdef _WIN32
+            append_format(&cmd, "/I \"%s\" ", inc);
+        #else
+            append_format(&cmd, "-I\"%s\" ", inc);
+        #endif
+        }
+        for (int j = 0; j < g_global_def_count; ++j) {
+        #ifdef _WIN32
+            append_format(&cmd, "/D%s ", g_global_defines[j]);
+        #else
+            append_format(&cmd, "-D%s ", g_global_defines[j]);
+        #endif
+        }
+        for (int j = 0; j < t->define_count; ++j) {
+        #ifdef _WIN32
+            append_format(&cmd, "/D%s ", t->defines[j]);
+        #else
+            append_format(&cmd, "-D%s ", t->defines[j]);
+        #endif
+        }
+        append_format(&cmd, "\"%s\"", src_file);
+
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            if (g_cc_count + 1 > g_cc_cap) {
+                g_cc_cap = g_cc_cap ? g_cc_cap * 2 : 4;
+                g_cc_entries = realloc(g_cc_entries, g_cc_cap * sizeof(*g_cc_entries));
+            }
+            g_cc_entries[g_cc_count].directory = strdup(cwd);
+            g_cc_entries[g_cc_count].command = strdup(cmd);
+            g_cc_entries[g_cc_count].file = strdup(src_file);
+            g_cc_count++;
+        }
+        free(cmd);
+    }
 }
 
 /* --- Implementation: Command API --- */
@@ -1940,6 +2264,26 @@ static void fprint_json_string(FILE *f, const char *s) {
 
 int cbuild_run(int argc, char **argv) {
     cbuild_init();
+
+    // Always clear compile_commands entries at the start of each build
+    if (g_cc_entries) {
+        for (int i = 0; i < g_cc_count; ++i) {
+            free(g_cc_entries[i].directory);
+            free(g_cc_entries[i].command);
+            free(g_cc_entries[i].file);
+        }
+        free(g_cc_entries);
+        g_cc_entries = NULL;
+    }
+    g_cc_count = 0;
+    g_cc_cap = 0;
+
+    // Pre-collect compile commands for all targets before building
+    if (g_generate_compile_commands) {
+        for (int i = 0; i < g_target_count; ++i) {
+            collect_compile_commands_for_target(g_targets[i]);
+        }
+    }
 
     // --- Subproject manifest mode ---
     if (argc > 1 && strcmp(argv[1], "--manifest") == 0) {
