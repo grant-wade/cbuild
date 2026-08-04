@@ -1,5 +1,11 @@
 .cache/
 build/
 cbuild
+cbuild.exe
+cbuild.old
+cbuild.exe.old
 compile_commands.json
+*.d
+*.sig
+*.link.sig
 .DS_Store

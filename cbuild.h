@@ -2,84 +2,150 @@
 ------------------------------------------------------------------------------
 cbuild.h - Minimal, cross-platform, header-only C build system
 
-Copyright (c) 2025 Grant Wade
+Copyright (c) 2025-2026 Grant Wade
 
 1. Purpose
 ----------
-A minimal, cross-platform, header-only build system for C projects. 
-Write your build logic directly in C, enabling full language power 
+A minimal, cross-platform, header-only build system for C projects.
+Write your build logic directly in C, enabling full language power
 and portability without external tools or scripts.
 
 2. Key Features
 ---------------
-- Target management: executables, static/shared libraries, custom commands
-- Dependency handling: tracks source/header changes, supports incremental builds
-- Source/include/library management: add sources, includes, libraries (wildcards supported)
-- Custom build logic: subcommands, pre/post build steps, user callbacks
-- Incremental builds: only rebuilds what has changed
-- Self-rebuilding: build executable can auto-rebuild when sources change
-- Subproject support: build and link subprojects, fetch targets from other cbuild projects
-- Compile_commands.json: optional generation for IDE tooling
-- Macro helpers: batch add sources/includes/defines, target definition macros
-- Platform abstraction: works on Windows, macOS, Linux
+- Targets: executables, static/shared libraries, file-dependency and dummy targets, custom commands
+- Build graph and dependencies with incremental rebuilds
+  - Uses timestamps plus compile/link signature files to detect flag/env changes
+  - GCC/Clang header deps via .d files; MSVC header deps via /showIncludes parsing
+- Parallel compilation across CPU cores (-j/--jobs)
+- Sources/includes/lib-dirs and libraries; supports wildcards including ** recursive
+- Command API: pre/post target commands, argv-based execution, shell command lines, and C callbacks; command dependencies
+- Subcommands: register named actions and run them with --run
+- Subprojects: query targets via --manifest, build them on demand, and link as dependencies
+- compile_commands.json generation with full arguments array (for clangd, etc.)
+- Build configurations: Debug/Release presets, per-target configs, structured knobs (optimization, LTO, sanitizers, etc.)
+- Toolchain detection and portability: GCC/Clang/MSVC, platform-specific outputs and SONAME/install_name
+- Self-rebuild support to recompile the build executable when its sources change
+- Inspection and maintenance: --list, --graph, --deps, --clean
+- Embeddable: context-based API with no global state, suitable for library use
 
-3. Supported Build Configurations
----------------------------------
-- Debug/release and custom flags per target or globally
-- Platform-specific output and compiler/linker flags
-- Compiler selection (gcc, clang, cl, etc.)
-- Feature flags and preprocessor defines (per-target and global)
-- Parallelism control (auto-detects CPU count, overrideable)
-- Dependency tracking (optional, .d file support)
-
-4. Usage Example
-----------------
+3. Basic Usage
+--------------
     #define CBUILD_IMPLEMENTATION
     #include "cbuild.h"
 
     int main(int argc, char** argv) {
-        cbuild_set_output_dir("build");
-        target_t* lib = cbuild_static_library("foo");
-        cbuild_add_source(lib, "foo.c");
-        target_t* exe = cbuild_executable("bar");
-        cbuild_add_source(exe, "bar.c");
-        cbuild_target_link_library(exe, lib);
-        return cbuild_run(argc, argv);
+        cbuild_context_t* ctx = cbuild_context_new();
+
+        cbuild_set_output_dir(ctx, "build");
+
+        target_t* lib = cbuild_static_library(ctx, "foo");
+        cbuild_add_source(ctx, lib, "foo.c");
+
+        target_t* exe = cbuild_executable(ctx, "bar");
+        cbuild_add_source(ctx, exe, "bar.c");
+        cbuild_add_link_target(ctx, exe, lib);
+
+        int result = cbuild_run(ctx, argc, argv);
+        cbuild_context_free(ctx);
+        return result;
     }
 
-Typical build commands:
-    $ gcc build.c -o cbuild
-    $ ./cbuild           # builds all targets
-    $ ./cbuild clean     # cleans build outputs
-    $ ./cbuild bar       # builds only 'bar' and its dependencies
+Typical invocations:
+    $ cc build.c -o cbuild            # or 'cl' on Windows
+    $ ./cbuild                        # builds all targets
+    $ ./cbuild --clean                # cleans build outputs
+    $ ./cbuild --run bar              # builds bar's target (if any) and runs the subcommand
+    $ ./cbuild --list                 # lists targets
+    $ ./cbuild --graph                # prints the build graph
+    $ ./cbuild --deps=mytarget        # shows reverse dependencies of 'mytarget'
+    $ ./cbuild -j 8                   # builds with 8 parallel jobs
+    $ ./cbuild --target=mytarget      # builds only the specified target
+    $ ./cbuild --compile-commands     # writes compile_commands.json to the output dir
 
-5. Dependencies & Integration Notes
------------------------------------
-- No external dependencies: single header, ANSI C, no Python/Lua/tools required
-- Integrate by including in your build.c and defining CBUILD_IMPLEMENTATION in one file
-- Subproject support: build and link other cbuild-based projects
-- Platform headers: handles Windows, macOS, Linux specifics internally
-- Self-rebuild: call cbuild_self_rebuild_if_needed() or use CBUILD_SELF_REBUILD macro
-
-6. Notable Macros & API
+4. Build Configurations
 -----------------------
-- CBUILD_IMPLEMENTATION: place in one .c file to enable implementation
-- CBUILD_SELF_REBUILD(...): auto-rebuild build executable if sources change
-- CBUILD_SOURCES, CBUILD_INCLUDES, CBUILD_LIB_DIRS, CBUILD_LINK_LIBS: batch add helpers
-- CBUILD_EXECUTABLE, CBUILD_STATIC_LIBRARY, CBUILD_SHARED_LIBRARY: target definition helpers
-- CBUILD_DEFINES: batch add preprocessor macros
-- CBUILD_SUBPROJECT: declare and initialize subprojects
+cbuild supports structured build configurations that abstract compiler-specific flags:
 
-7. Documentation
-----------------
-- Doxygen-style comments and usage instructions are provided throughout this header.
-- See function and macro documentation below for details.
+    cbuild_context_t* ctx = cbuild_context_new();
+
+    // Use a preset configuration
+    config_t* debug = cbuild_config_default_debug(ctx);
+    config_t* release = cbuild_config_default_release(ctx);
+
+    // Or create a custom configuration
+    config_t* custom = cbuild_config_new(ctx, "Custom");
+    cbuild_config_set_opt(ctx, custom, 2);           // -O2 or /O2
+    cbuild_config_set_debug(ctx, custom, 1);         // -g or /Zi
+    cbuild_config_set_std(ctx, custom, "c11");       // -std=c11 or /std:c11
+    cbuild_config_set_warnings(ctx, custom, 2);      // -Wall -Wextra -Wpedantic or /W4
+    cbuild_config_set_lto(ctx, custom, 1);           // -flto or /GL + /LTCG
+    cbuild_config_enable_sanitizers(ctx, custom, 1); // -fsanitize=address
+    cbuild_config_set_output_dir(ctx, custom, "build/custom");
+
+    // Set active configuration (applies to all targets by default)
+    cbuild_set_active_config(ctx, release);
+
+    // Or override per-target
+    cbuild_target_set_config(ctx, my_debug_tool, debug);
+
+5. Programmatic / Library Use
+-----------------------------
+For embedding cbuild or using it programmatically without CLI parsing:
+
+    cbuild_context_t* ctx = cbuild_context_new();
+
+    // Configure the build
+    cbuild_set_output_dir(ctx, "build");
+    cbuild_set_compiler(ctx, "clang");
+    cbuild_set_parallelism(ctx, 4);
+
+    // Define targets...
+    target_t* exe = cbuild_executable(ctx, "myapp");
+    cbuild_add_source(ctx, exe, "main.c");
+
+    // Build programmatically (without CLI)
+    int result = cbuild_build(ctx, NULL);        // build all targets
+    int result = cbuild_build(ctx, "myapp");     // build specific target
+
+    // Or configure from argv without running
+    cbuild_configure_from_argv(ctx, argc, argv);
+
+    // Check errors
+    const char* err = cbuild_get_last_error(ctx);
+    if (err) fprintf(stderr, "Error: %s\n", err);
+
+    // Reset for reuse (clears targets, keeps allocator)
+    cbuild_reset(ctx);
+
+    // Clean up
+    cbuild_context_free(ctx);
+
+6. Custom Logging
+-----------------
+Replace the default logger for integration with other systems:
+
+    void my_logger(void* user_data, cbuild_log_level_t level, const char* msg) {
+        MyApp* app = (MyApp*)user_data;
+        // Route to your logging system
+    }
+
+    cbuild_set_logger(ctx, my_logger, my_app);
+
+7. Integration Notes
+--------------------
+- Single header: include in your build.c and define CBUILD_IMPLEMENTATION in exactly one translation unit
+- Context-based: all state lives in cbuild_context_t, no globals, safe for library embedding
+- Subprojects: add with cbuild_add_subproject() and link via cbuild_subproject_get_target()
+- Argv-based process execution avoids shell quoting issues on all platforms
+- Wildcards supported for sources/includes/libs (including ** recursive)
+- Platform headers abstract Windows, macOS, and Linux differences
+- Self-rebuild: call cbuild_self_rebuild_if_needed() or use CBUILD_SELF_REBUILD macro
 
 8. License
 ----------
 BSD 3-Clause License
 
-Copyright (c) 2025 Grant Wade
+Copyright (c) 2025-2026 Grant Wade
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -116,545 +182,266 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 extern "C" {
 #endif
 
-/**
- * @typedef target_t
- * @brief Opaque handle representing a build target (executable or library).
- */
+// *** Type Definitions *** //
+typedef struct cbuild_context cbuild_context_t;
 typedef struct cbuild_target target_t;
-
-/**
- * @typedef command_t
- * @brief Opaque handle representing a build command to be executed.
- */
 typedef struct cbuild_command command_t;
-
-/**
- * @typedef subproject_t
- * @brief Opaque handle representing a subproject within the build system.
- */
 typedef struct cbuild_subproject subproject_t;
+typedef struct cbuild_config config_t;
 
-/**
- * @brief Callback type for custom subcommands.
- * @param user_data Pointer to user-defined data passed to the callback.
- */
-typedef void (*cbuild_subcommand_callback)(void *user_data);
+typedef void (*cbuild_subcommand_callback)(void* user_data);
+typedef int (*cbuild_flag_callback)(const char* value, void* user_data);
 
-/**
- * @brief Create a new executable build target.
- *
- * @param name Name of the executable target (no file extension needed).
- * @return Pointer to the created target object.
- */
-target_t *cbuild_executable(const char *name);
+typedef enum {
+    CBUILD_FLAG_PRE = 0,          /* parse-time actions; set globals, early exits */
+    CBUILD_FLAG_BEFORE_BUILD = 1, /* runs after graph is ready, before build */
+    CBUILD_FLAG_AFTER_BUILD = 2   /* runs after a successful build */
+} cbuild_flag_phase_t;
 
-/**
- * @brief Create a new static library build target.
- *
- * On Unix, the 'lib' prefix and .a extension will be added automatically.
- *
- * @param name Name of the static library target.
- * @return Pointer to the created target object.
- */
-target_t *cbuild_static_library(const char *name);
+/* Special return code to signal "handled & exit(0)". */
+#define CBUILD_FLAG_EXIT 777
 
-/**
- * @brief Create a new shared library build target.
- *
- * Adds the appropriate extension (.dll, .so, or .dylib) based on the platform.
- *
- * @param name Name of the shared library target.
- * @return Pointer to the created target object.
- */
-target_t *cbuild_shared_library(const char *name);
+// *** Logging System *** //
+typedef enum {
+    CBUILD_LOG_INFO = 0,
+    CBUILD_LOG_WARNING,
+    CBUILD_LOG_ERROR,
+    CBUILD_LOG_STEP,
+    CBUILD_LOG_STATUS_OK,
+    CBUILD_LOG_STATUS_FAIL,
+    CBUILD_LOG_VERBOSE
+} cbuild_log_level_t;
 
-/**
- * @brief Create a shell command to be run as part of the build graph.
- *
- * The command string is executed as-is by the shell.
- *
- * @param name Name of the command.
- * @param command_line Shell command to execute.
- * @return Pointer to the created command object.
- */
-command_t *cbuild_command(const char *name, const char *command_line);
+typedef void (*cbuild_log_fn)(void* user_data, cbuild_log_level_t level, const char* msg);
 
-/**
- * @brief Add a command as a dependency of a target.
- *
- * The command will run before the target is built.
- *
- * @param target Target to add the command dependency to.
- * @param cmd Command to add as a dependency.
- */
-void cbuild_target_add_command(target_t *target, command_t *cmd);
+// *** Context API *** //
+cbuild_context_t* cbuild_context_new(void);
+void cbuild_context_free(cbuild_context_t* ctx);
+void cbuild_set_logger(cbuild_context_t* ctx, cbuild_log_fn callback, void* user_data);
+const char* cbuild_get_last_error(cbuild_context_t* ctx);
+void cbuild_set_user_data(cbuild_context_t* ctx, void* data);
+void* cbuild_get_user_data(cbuild_context_t* ctx);
 
-/**
- * @brief Add a command as a dependency of another command.
- *
- * The dependency command will run before the main command.
- *
- * @param cmd Command to add the dependency to.
- * @param dependency Command to add as a dependency.
- */
-void cbuild_command_add_dependency(command_t *cmd, command_t *dependency);
+// *** Main Entrypoint *** //
+int cbuild_run(cbuild_context_t* ctx, int argc, char** argv);
 
-/**
- * @brief Run a command immediately (not as part of the build graph).
- *
- * @param cmd Command to run.
- * @return 0 on success, nonzero on failure.
- */
-int cbuild_run_command(command_t *cmd);
+// *** Programmatic Build API *** //
+int cbuild_build(cbuild_context_t* ctx, const char* target_name);
+int cbuild_clean(cbuild_context_t* ctx);
+int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv);
 
-/**
- * @brief Add a command to be run after the target is built (post-build step).
- *
- * @param target Target to add the post-build command to.
- * @param cmd Command to run after the target is built.
- */
-void cbuild_target_add_post_command(target_t *target, command_t *cmd);
+// *** Reset Build State *** //
+void cbuild_reset(cbuild_context_t* ctx);
+void cbuild_teardown(cbuild_context_t* ctx);
 
-/**
- * @brief Add a source file to a target.
- *
- * The source file can be C or C++ source code. Wildcards are supported.
- *
- * @param target Target to add the source file to.
- * @param source_file Path to the source file.
- */
-void cbuild_add_source(target_t *target, const char *source_file);
+// *** Target creation functions *** //
+target_t* cbuild_executable(cbuild_context_t* ctx, const char* name);
+target_t* cbuild_static_library(cbuild_context_t* ctx, const char* name);
+target_t* cbuild_shared_library(cbuild_context_t* ctx, const char* name);
+target_t* cbuild_dummy_target(cbuild_context_t* ctx, const char* name);
+target_t* cbuild_file_dep_target(cbuild_context_t* ctx, const char* name, const char* file_path);
 
-/**
- * @brief Add an include directory for a target.
- *
- * The directory is passed to the compiler as -I or /I.
- *
- * @param target Target to add the include directory to.
- * @param include_path Path to the include directory.
- */
-void cbuild_add_include_dir(target_t *target, const char *include_path);
+// *** Target sources/includes/links/flags setup *** //
+// All functions return 0 on success, -1 on failure (sets last_error)
+int cbuild_add_source(cbuild_context_t* ctx, target_t* target, const char* source_file);
+int cbuild_add_include_dir(cbuild_context_t* ctx, target_t* target, const char* include_path);
+int cbuild_add_library_dir(cbuild_context_t* ctx, target_t* target, const char* lib_dir);
+int cbuild_add_link_library(cbuild_context_t* ctx, target_t* target, const char* lib_name);
+int cbuild_add_link_target(cbuild_context_t* ctx, target_t* dependant, target_t* dependency);
+int cbuild_add_expose_library(cbuild_context_t* ctx, target_t* target, const char* lib_path);
+int cbuild_export_symbols(cbuild_context_t* ctx, target_t* target);
+int cbuild_add_cflags(cbuild_context_t* ctx, target_t* target, const char* cflags);
+int cbuild_add_ldflags(cbuild_context_t* ctx, target_t* target, const char* ldflags);
+int cbuild_add_flag(cbuild_context_t* ctx, target_t* target, const char* flag, int value);
+int cbuild_add_define(cbuild_context_t* ctx, target_t* target, const char* macro);
+int cbuild_add_define_val(cbuild_context_t* ctx, target_t* target, const char* macro, const char* value);
 
-/**
- * @brief Add a library search directory for a target's link phase.
- *
- * The directory is passed to the linker as -L or /LIBPATH.
- *
- * @param target Target to add the library directory to.
- * @param lib_dir Path to the library directory.
- */
-void cbuild_add_library_dir(target_t *target, const char *lib_dir);
+// *** Context Settings *** //
+void cbuild_set_output_dir(cbuild_context_t* ctx, const char* dir);
+void cbuild_set_parallelism(cbuild_context_t* ctx, int jobs_count);
+void cbuild_set_compiler(cbuild_context_t* ctx, const char* compiler_exe);
+void cbuild_set_linker(cbuild_context_t* ctx, const char* linker_exe);
+void cbuild_set_archiver(cbuild_context_t* ctx, const char* archiver_exe);
+void cbuild_target_set_linker(cbuild_context_t* ctx, target_t* t, const char* linker_exe);
+void cbuild_set_output_file(cbuild_context_t* ctx, target_t* t, const char* path);
+void cbuild_set_soname(cbuild_context_t* ctx, target_t* t, const char* soname);
+void cbuild_set_build_type(cbuild_context_t* ctx, const char* build_type);
+void cbuild_add_global_cflags(cbuild_context_t* ctx, const char* flags);
+void cbuild_add_global_ldflags(cbuild_context_t* ctx, const char* flags);
+void cbuild_add_global_define(cbuild_context_t* ctx, const char* macro);
+void cbuild_add_global_define_val(cbuild_context_t* ctx, const char* macro, const char* value);
+void cbuild_add_global_flag(cbuild_context_t* ctx, const char* flag, int value);
+void cbuild_enable_compile_commands(cbuild_context_t* ctx, int enabled);
+void cbuild_guess_compiler(cbuild_context_t* ctx);
+int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, const char** sources, int sources_count);
+void cbuild_set_verbose(cbuild_context_t* ctx, int verbose);
 
-/**
- * @brief Link an external library to a target by name.
- *
- * For GCC/Clang, use names like "m" for math (adds -lm).
- * For MSVC, use the library base name (e.g., "User32" for User32.lib).
- *
- * @param target Target to link the library to.
- * @param lib_name Name of the library to link.
- */
-void cbuild_add_link_library(target_t *target, const char *lib_name);
+// *** Build Configuration API *** //
+config_t* cbuild_config_new(cbuild_context_t* ctx, const char* name);
+config_t* cbuild_config_default_debug(cbuild_context_t* ctx);
+config_t* cbuild_config_default_release(cbuild_context_t* ctx);
+config_t* cbuild_config_default_wasm32(cbuild_context_t* ctx);
 
-/**
- * @brief Declare that one target links against another target.
- *
- * The dependency target will be built first, and its output will be linked into the dependant.
- *
- * @param dependant Target that depends on the other.
- * @param dependency Target to be linked as a dependency.
- */
-void cbuild_target_link_library(target_t *dependant, target_t *dependency);
+void cbuild_set_active_config(cbuild_context_t* ctx, config_t*);
+void cbuild_target_set_config(cbuild_context_t* ctx, target_t*, config_t*);
 
-/**
- * @brief Override global CFLAGS for a specific target.
- *
- * @param target Target to set custom CFLAGS for.
- * @param cflags Compiler flags to use for this target.
- */
-void cbuild_target_add_cflags(target_t *target, const char *cflags);
+void cbuild_config_free(cbuild_context_t* ctx, config_t*);
+void cbuild_config_add_cflags(cbuild_context_t* ctx, config_t*, const char* flags);
+void cbuild_config_add_ldflags(cbuild_context_t* ctx, config_t*, const char* flags);
+void cbuild_config_add_define(cbuild_context_t* ctx, config_t*, const char* def);
+void cbuild_config_add_include(cbuild_context_t* ctx, config_t*, const char* dir);
+void cbuild_config_add_libdir(cbuild_context_t* ctx, config_t*, const char* dir);
+void cbuild_config_add_linklib(cbuild_context_t* ctx, config_t*, const char* lib);
+void cbuild_config_set_opt(cbuild_context_t* ctx, config_t*, int level);
+void cbuild_config_set_debug(cbuild_context_t* ctx, config_t*, int on);
+void cbuild_config_set_lto(cbuild_context_t* ctx, config_t*, int mode);
+void cbuild_config_set_pic(cbuild_context_t* ctx, config_t*, int on);
+void cbuild_config_set_warnings(cbuild_context_t* ctx, config_t*, int mode);
+void cbuild_config_set_std(cbuild_context_t* ctx, config_t*, const char* std);
+void cbuild_config_set_runtime(cbuild_context_t* ctx, config_t*, const char* runtime);
+void cbuild_config_set_output_dir(cbuild_context_t* ctx, config_t*, const char* output_dir);
+void cbuild_config_set_freestanding(cbuild_context_t* ctx, config_t*, int on);
+void cbuild_config_enable_sanitizers(cbuild_context_t* ctx, config_t*, int mask);
+void cbuild_config_disable_sanitizers(cbuild_context_t* ctx, config_t*, int mask);
+void cbuild_config_set_compiler(cbuild_context_t* ctx, config_t*, const char* compiler);
+void cbuild_config_set_linker(cbuild_context_t* ctx, config_t*, const char* linker);
 
-/**
- * @brief Set a custom output directory for all build artifacts.
- *
- * This affects object files, libraries, and executables. Default is "build".
- *
- * @param dir Path to the output directory.
- */
-void cbuild_set_output_dir(const char *dir);
+// *** Command API *** //
+int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd);
+command_t* cbuild_command(cbuild_context_t* ctx, const char* name, const char* command_line);
+command_t* cbuild_command_argv(cbuild_context_t* ctx, const char* name, char** argv, int argc);
+command_t* cbuild_command_function(cbuild_context_t* ctx, const char* name,
+                                   cbuild_subcommand_callback callback,
+                                   void* user_data);
+void cbuild_target_add_command(cbuild_context_t* ctx, target_t* target, command_t* cmd);
+void cbuild_target_add_post_command(cbuild_context_t* ctx, target_t* target, command_t* cmd);
+void cbuild_command_add_dependency(cbuild_context_t* ctx, command_t* cmd, command_t* dependency);
 
-/**
- * @brief Set the number of parallel compile jobs.
- *
- * Default is the number of CPU cores (at least 1).
- *
- * @param jobs_count Number of parallel jobs.
- */
-void cbuild_set_parallelism(int jobs_count);
-
-/**
- * @brief Manually specify the C compiler to use.
- *
- * If not set, cbuild auto-detects or uses the environment variable CC.
- *
- * @param compiler_exe Name or path of the compiler executable (e.g., "gcc", "clang", "cl").
- */
-void cbuild_set_compiler(const char *compiler_exe);
-
-/**
- * @brief Specify additional global compiler flags.
- *
- * These flags are applied to all targets. Optional.
- *
- * @param flags Compiler flags to add globally.
- */
-void cbuild_add_global_cflags(const char *flags);
-
-/**
- * @brief Specify additional global linker flags for executables/shared libraries.
- *
- * Optional.
- *
- * @param flags Linker flags to add globally.
- */
-void cbuild_add_global_ldflags(const char *flags);
-
-/**
- * @brief Enable or disable dependency tracking.
- *
- * Enables header dependency detection and .d file generation. Disabled by default.
- *
- * @param enabled Nonzero to enable, zero to disable.
- */
-void cbuild_enable_dep_tracking(int enabled);
-
-/**
- * @brief Automatically rebuild the build executable if any source files have changed.
- *
- * Checks if the running executable is out-of-date with respect to the given sources.
- * If so, moves itself to .old, rebuilds, and execs the new binary with the same arguments.
- * Call this at the start of main().
- *
- * @param argc main's argc
- * @param argv main's argv
- * @param sources Array of source file paths (e.g. {"build.c", "cbuild.h"})
- * @param sources_count Number of source files
- */
-void cbuild_self_rebuild_if_needed(int argc, char **argv, const char **sources,
-                                   int sources_count);
-
-/**
- * @brief Enable or disable generation of compile_commands.json.
- *
- * @param enabled Nonzero to enable, zero to disable.
- */
-void cbuild_enable_compile_commands(int enabled);
-
-/**
- * @brief Declare a subproject to be included in the build.
- *
- * @param alias      An arbitrary name for this project (used to scope its proxy targets).
- * @param directory  Path to the subproject's root (where build.c lives).
- * @param cbuild_exe Path to the cbuild driver to invoke (usually "../cbuild").
- * @return           A handle to the subproject.
- */
-subproject_t *cbuild_add_subproject(const char *alias, const char *directory,
-                                    const char *cbuild_exe);
-
-/**
- * @brief Fetch one of the subproject’s built targets by name.
- *
- * This creates a proxy target_t* in the current graph which:
- *  - depends on the subproject build command
- *  - has its output_file set to the subproject’s artifact path
- *  - can be passed to cbuild_target_link_library(), cbuild_add_library_dir(), etc.
- *
- * @param sub      Subproject handle.
- * @param tgt_name Name of the target to fetch from the subproject.
- * @return         Proxy target handle, or NULL on error (no such target in the manifest).
- */
-target_t *cbuild_subproject_get_target(subproject_t *sub, const char *tgt_name);
-
-/**
- * @def CBUILD_SUBPROJECT(ALIAS, DIR, EXE)
- * @brief Convenience macro for declaring a subproject.
- *
- * Declares and initializes a subproject handle named ALIAS.
- *
- * @param ALIAS Variable name for the subproject handle.
- * @param DIR   Path to the subproject directory.
- * @param EXE   Path to the cbuild executable for the subproject.
- */
-#define CBUILD_SUBPROJECT(ALIAS, DIR, EXE) \
-    subproject_t *ALIAS = cbuild_add_subproject(#ALIAS, DIR, EXE)
-
-/**
- * @brief Execute the build process.
- *
- * Call this in main() with the program arguments.
- * Recognized commands:
- *   - no arguments: build all targets
- *   - "clean": remove built files
- *   - target name(s): build only those targets (and their dependencies)
- *
- * @param argc Argument count from main().
- * @param argv Argument vector from main().
- * @return 0 on success, nonzero on failure.
- */
-int cbuild_run(int argc, char **argv);
-
-/**
- * @brief Register a custom subcommand for the build system.
- *
- * @param name         The subcommand name (e.g. "test").
- * @param target       The target that must be built before the subcommand runs.
- * @param command_line Shell command to run (optional, can be NULL if using callback).
- * @param callback     User callback function to run (optional, can be NULL if using command_line).
- * @param user_data    User data pointer passed to callback (can be NULL).
- */
-void cbuild_register_subcommand(const char *name, target_t *target,
-                                const char *command_line,
+// *** Subproject API *** //
+subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, const char* directory,
+                                    const char* cbuild_exe);
+target_t* cbuild_subproject_get_target(cbuild_context_t* ctx, subproject_t* sub, const char* tgt_name);
+void cbuild_register_subcommand(cbuild_context_t* ctx, const char* name, target_t* target,
+                                const char* command_line,
                                 cbuild_subcommand_callback callback,
-                                void *user_data);
+                                void* user_data);
 
-/**
- * @brief Define a preprocessor macro for a specific target.
- *
- * Equivalent to passing -DMACRO (or /DMACRO on MSVC).
- *
- * @param target Target to add the macro to.
- * @param macro  Macro name to define.
- */
-void cbuild_add_define(target_t *target, const char *macro);
+/* Register a flag handler. */
+void cbuild_register_flag(cbuild_context_t* ctx, const char* long_name,
+                          char short_name,
+                          int takes_value,
+                          cbuild_flag_phase_t phase,
+                          const char* help,
+                          cbuild_flag_callback cb,
+                          void* user_data);
 
-/**
- * @brief Define a preprocessor macro with a value for a specific target.
- *
- * Equivalent to passing -DMACRO=VALUE (or /DMACRO=VALUE on MSVC).
- *
- * @param target Target to add the macro to.
- * @param macro  Macro name to define.
- * @param value  Value to assign to the macro.
- */
-void cbuild_add_define_val(target_t *target,
-                           const char *macro,
-                           const char *value);
+/* Convenience registrations that bind outputs directly. */
+void cbuild_register_flag_bool(cbuild_context_t* ctx, const char* long_name, char short_name,
+                               cbuild_flag_phase_t phase, const char* help,
+                               int* out_bool);
 
-/**
- * @brief Toggle a boolean feature flag for a target.
- *
- * true  → -DFLAG=1 , false → -DFLAG=0
- *
- * @param target Target to set the flag for.
- * @param flag   Name of the flag.
- * @param value  Boolean value (nonzero for true, zero for false).
- */
-void cbuild_set_flag(target_t *target, const char *flag, int value);
+void cbuild_register_flag_int(cbuild_context_t* ctx, const char* long_name, char short_name,
+                              cbuild_flag_phase_t phase, const char* help,
+                              int* out_int);
 
-/**
- * @brief Define a global preprocessor macro for all targets.
- *
- * @param macro Macro name to define globally.
- */
-void cbuild_add_global_define(const char *macro);
+void cbuild_register_flag_str(cbuild_context_t* ctx, const char* long_name, char short_name,
+                              cbuild_flag_phase_t phase, const char* help,
+                              const char** out_str);
 
-/**
- * @brief Define a global preprocessor macro with a value for all targets.
- *
- * @param macro Macro name to define globally.
- * @param value Value to assign to the macro.
- */
-void cbuild_add_global_define_val(const char *macro, const char *value);
+// *** Argument Parsing Helpers *** //
+int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_name);
 
-/**
- * @brief Toggle a global boolean feature flag for all targets.
- *
- * @param flag  Name of the flag.
- * @param value Boolean value (nonzero for true, zero for false).
- */
-void cbuild_set_global_flag(const char *flag, int value);
+// *** File System and Other Helpers *** //
+int cbuild_file_exists(const char* path);
+int cbuild_dir_exists(const char* path);
+int cbuild_remove_file(const char* path);
+int cbuild_remove_dir(const char* path);
+int cbuild_get_cwd(char* buf, long size);
+int cbuild_match_wildcard(const char* pattern, const char* string);
+int cbuild_expand_wildcard(const char* pattern, char*** files, int* file_count);
+int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
+                                     char*** files, int* file_count,
+                                     int* capacity);
 
-/**
- * @brief Check if a file exists.
- *
- * @param path Path to the file.
- * @return 1 if the file exists, 0 otherwise.
- */
-int cbuild_file_exists(const char *path);
+// *** Convenience Macros (require ctx variable in scope) *** //
+#define CBUILD_SUBPROJECT(CTX, ALIAS, DIR, EXE) \
+    subproject_t* ALIAS = cbuild_add_subproject((CTX), #ALIAS, DIR, EXE)
 
-// Helper: check if a directory exists
-/**
- * @brief Check if a directory exists.
- *
- * @param path Path to the directory.
- * @return 1 if the directory exists, 0 otherwise.
- */
-int cbuild_dir_exists(const char *path);
-
-// Helper: remove a file
-/**
- * @brief Remove a file from the filesystem.
- *
- * @param path Path to the file.
- * @return 0 on success, -1 on failure.
- */
-int cbuild_remove_file(const char *path);
-
-// Helper: remove a directory recursively
-/**
- * @brief Remove a directory and its contents recursively.
- *
- * @param path Path to the directory.
- * @return 0 on success, -1 on failure.
- */
-int cbuild_remove_dir(const char *path);
-
-// Helper: get the current working directory
-/**
- * @brief Get the current working directory.
- *
- * @param buf  Buffer to store the current working directory path.
- * @param size Size of the buffer.
- * @return 0 on success, -1 on failure.
- */
-int cbuild_get_cwd(char *buf, long size);
-
-
-/**
- * @def CBUILD_SELF_REBUILD(...)
- * @brief Macro to self-rebuild the build executable if any listed source files change.
- *
- * Expands to a call to cbuild_self_rebuild_if_needed() with the provided source files.
- *
- * @param ... List of source file paths (e.g., "build.c", "cbuild.h").
- */
-#define CBUILD_SELF_REBUILD(...)                                              \
+#define CBUILD_SELF_REBUILD(CTX, ARGC, ARGV, ...)                             \
     do {                                                                      \
-        const char *_srcs[] = { __VA_ARGS__ };                                \
-        cbuild_self_rebuild_if_needed(argc, argv, _srcs,                      \
-                                      (int)(sizeof(_srcs) / sizeof(*_srcs))); \
+        const char* _srcs[] = { __VA_ARGS__ };                                \
+        if (cbuild_self_rebuild_if_needed((CTX), (ARGC), (ARGV), _srcs,       \
+                                      (int)(sizeof(_srcs) / sizeof(*_srcs))) != 0) \
+            return 1;                                                         \
     } while (0)
 
-/**
- * @def CBUILD_SOURCES(TGT, ...)
- * @brief Macro to add multiple source files to a target.
- *
- * @param TGT  Target to add sources to.
- * @param ...  List of source file paths.
- */
-#define CBUILD_SOURCES(TGT, ...)                                     \
+#define CBUILD_SOURCES(CTX, TGT, ...)                                \
     do {                                                             \
-        const char *_a[] = { __VA_ARGS__ };                          \
+        const char* _a[] = { __VA_ARGS__ };                          \
         for (int _i = 0; _i < (int)(sizeof(_a) / sizeof(*_a)); _i++) \
-            cbuild_add_source(TGT, _a[_i]);                          \
+            cbuild_add_source((CTX), (TGT), _a[_i]);                 \
     } while (0)
 
-/**
- * @def CBUILD_INCLUDES(TGT, ...)
- * @brief Macro to add multiple include directories to a target.
- *
- * @param TGT  Target to add include directories to.
- * @param ...  List of include directory paths.
- */
-#define CBUILD_INCLUDES(TGT, ...)                                    \
+#define CBUILD_INCLUDES(CTX, TGT, ...)                               \
     do {                                                             \
-        const char *_a[] = { __VA_ARGS__ };                          \
+        const char* _a[] = { __VA_ARGS__ };                          \
         for (int _i = 0; _i < (int)(sizeof(_a) / sizeof(*_a)); _i++) \
-            cbuild_add_include_dir(TGT, _a[_i]);                     \
+            cbuild_add_include_dir((CTX), (TGT), _a[_i]);            \
     } while (0)
 
-/**
- * @def CBUILD_LIB_DIRS(TGT, ...)
- * @brief Macro to add multiple library directories to a target.
- *
- * @param TGT  Target to add library directories to.
- * @param ...  List of library directory paths.
- */
-#define CBUILD_LIB_DIRS(TGT, ...)                                    \
+#define CBUILD_LIB_DIRS(CTX, TGT, ...)                               \
     do {                                                             \
-        const char *_a[] = { __VA_ARGS__ };                          \
+        const char* _a[] = { __VA_ARGS__ };                          \
         for (int _i = 0; _i < (int)(sizeof(_a) / sizeof(*_a)); _i++) \
-            cbuild_add_library_dir(TGT, _a[_i]);                     \
+            cbuild_add_library_dir((CTX), (TGT), _a[_i]);            \
     } while (0)
 
-/**
- * @def CBUILD_LINK_LIBS(TGT, ...)
- * @brief Macro to link multiple libraries to a target.
- *
- * @param TGT  Target to link libraries to.
- * @param ...  List of library names or paths.
- */
-#define CBUILD_LINK_LIBS(TGT, ...)                                   \
+#define CBUILD_LINK_LIBS(CTX, TGT, ...)                              \
     do {                                                             \
-        const char *_a[] = { __VA_ARGS__ };                          \
+        const char* _a[] = { __VA_ARGS__ };                          \
         for (int _i = 0; _i < (int)(sizeof(_a) / sizeof(*_a)); _i++) \
-            cbuild_add_link_library(TGT, _a[_i]);                    \
+            cbuild_add_link_library((CTX), (TGT), _a[_i]);           \
     } while (0)
 
-/**
- * @def CBUILD_EXECUTABLE(NAME, ...)
- * @brief Macro to define an executable target with sources, includes, lib dirs, and libs.
- *
- * @param NAME Variable name for the target.
- * @param ...  Additional build configuration statements.
- */
-#define CBUILD_EXECUTABLE(NAME, ...)     \
-    do {                                 \
-        NAME = cbuild_executable(#NAME); \
-        __VA_ARGS__                      \
+#define CBUILD_EXECUTABLE(CTX, NAME, ...)     \
+    do {                                      \
+        NAME = cbuild_executable((CTX), #NAME); \
+        __VA_ARGS__                           \
     } while (0)
 
-/**
- * @def CBUILD_STATIC_LIBRARY(NAME, ...)
- * @brief Macro to define a static library target with sources.
- *
- * @param NAME Variable name for the target.
- * @param ...  Additional build configuration statements.
- */
-#define CBUILD_STATIC_LIBRARY(NAME, ...)     \
-    do {                                     \
-        NAME = cbuild_static_library(#NAME); \
-        __VA_ARGS__                          \
+#define CBUILD_STATIC_LIBRARY(CTX, NAME, ...)     \
+    do {                                          \
+        NAME = cbuild_static_library((CTX), #NAME); \
+        __VA_ARGS__                               \
     } while (0)
 
-/**
- * @def CBUILD_SHARED_LIBRARY(NAME, ...)
- * @brief Macro to define a shared library target with sources.
- *
- * @param NAME Variable name for the target.
- * @param ...  Additional build configuration statements.
- */
-#define CBUILD_SHARED_LIBRARY(NAME, ...)     \
-    do {                                     \
-        NAME = cbuild_shared_library(#NAME); \
-        __VA_ARGS__                          \
+#define CBUILD_SHARED_LIBRARY(CTX, NAME, ...)     \
+    do {                                          \
+        NAME = cbuild_shared_library((CTX), #NAME); \
+        __VA_ARGS__                               \
     } while (0)
 
-/**
- * @def CBUILD_DEFINES(TGT, ...)
- * @brief Macro to define multiple preprocessor macros for a target.
- *
- * @param TGT  Target to add macros to.
- * @param ...  List of macro names.
- */
-#define CBUILD_DEFINES(TGT, ...)                                           \
+#define CBUILD_DEFINES(CTX, TGT, ...)                                      \
     do {                                                                   \
-        const char *_defs[] = { __VA_ARGS__ };                             \
+        const char* _defs[] = { __VA_ARGS__ };                             \
         for (int _i = 0; _i < (int)(sizeof(_defs) / sizeof(*_defs)); _i++) \
-            cbuild_add_define((TGT), _defs[_i]);                           \
+            cbuild_add_define((CTX), (TGT), _defs[_i]);                    \
     } while (0)
-
 
 #ifdef __cplusplus
 }
 #endif
 
+#endif /* CBUILD_H */
+
 /* ---------------------------------------------------------------------- */
 /* Implementation below (define CBUILD_IMPLEMENTATION in one source file) */
 /* ---------------------------------------------------------------------- */
-#endif /* CBUILD_H */
-
 #ifdef CBUILD_IMPLEMENTATION
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>  // for PATH_MAX
 #include <stdarg.h>
@@ -673,20 +460,42 @@ int cbuild_get_cwd(char *buf, long size);
 #define unlink _unlink
 #define rmdir _rmdir
 #define getcwd _getcwd
+#define chdir _chdir
 #define PATH_MAX MAX_PATH
+/* POSIX compatibility macros for Windows */
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
+#define strtok_r strtok_s
+#define strcasecmp _stricmp
+#define strdup _strdup
+#define isatty _isatty
 #else
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>  // _NSGetExecutablePath
+#endif
 #include <pthread.h>
+#include <semaphore.h>
+#include <strings.h>
 #include <unistd.h>
+
+extern char** environ; /* for posix_spawnp */
 #endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096  // reasonable default for most systems
 #endif
 
-// --- Pretty-printing helpers (ANSI colors) ---
+#define CBUILD_EXE_SUFFIX ".exe"
+
 #ifndef _WIN32
 #define CBUILD_COLOR_RESET "\033[0m"
 #define CBUILD_COLOR_BOLD "\033[1m"
@@ -695,6 +504,7 @@ int cbuild_get_cwd(char *buf, long size);
 #define CBUILD_COLOR_BLUE "\033[34m"
 #define CBUILD_COLOR_MAGENTA "\033[35m"
 #define CBUILD_COLOR_RED "\033[31m"
+#define CBUILD_OBJ_EXT ".o"
 #else
 #define CBUILD_COLOR_RESET ""
 #define CBUILD_COLOR_BOLD ""
@@ -703,33 +513,29 @@ int cbuild_get_cwd(char *buf, long size);
 #define CBUILD_COLOR_BLUE ""
 #define CBUILD_COLOR_MAGENTA ""
 #define CBUILD_COLOR_RED ""
+#define CBUILD_OBJ_EXT ".obj"
 #endif
 
-static void cbuild_pretty_step(const char *label, const char *color,
-                               const char *fmt, ...) {
-    printf("%s%-10s%s ", color, label, CBUILD_COLOR_RESET);
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
-    printf("\n");
+static void cbuild__default_logger(void* user_data, cbuild_log_level_t level, const char* msg);
+static void cbuild__log(cbuild_context_t* ctx, cbuild_log_level_t level, const char* fmt, ...);
+static void cbuild__log_step(cbuild_context_t* ctx, const char* label, const char* color, const char* fmt, ...);
+static void cbuild__log_status(cbuild_context_t* ctx, int ok, const char* fmt, ...);
+static void cbuild__set_error(cbuild_context_t* ctx, const char* fmt, ...);
+
+/* Normalize path separators to forward slashes for consistent hashing/comparison */
+static char* cbuild__normalize_path(const char* path) {
+    if (!path) return NULL;
+    char* normalized = strdup(path);
+    if (!normalized) return NULL;
+#ifdef _WIN32
+    for (char* p = normalized; *p; ++p) {
+        if (*p == '\\') *p = '/';
+    }
+#endif
+    return normalized;
 }
 
-static void cbuild_pretty_status(int ok, const char *fmt, ...) {
-    if (ok)
-        printf("%s%s%s ", CBUILD_COLOR_GREEN, "✔", CBUILD_COLOR_RESET);
-    else
-        printf("%s%s%s ", CBUILD_COLOR_RED, "✖", CBUILD_COLOR_RESET);
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
-    printf("\n");
-}
-
-#define CBUILD_EXE_SUFFIX ".exe"
-
-static int cbuild__needs_rebuild(const char *exe_path, const char **sources,
+static int cbuild__needs_rebuild(const char* exe_path, const char** sources,
                                  int sources_count) {
     struct stat st_exe;
     if (stat(exe_path, &st_exe) != 0)
@@ -744,23 +550,28 @@ static int cbuild__needs_rebuild(const char *exe_path, const char **sources,
     return 0;
 }
 
-static void cbuild__exec_new_build(const char *exe_path, int argc,
-                                   char **argv) {
+static int cbuild__exec_new_build(const char* exe_path, int argc,
+                                  char** argv) {
+    (void)argc;
 #ifdef _WIN32
     _spawnv(_P_OVERLAY, exe_path, argv);
-    exit(1);
+    return -1;
 #else
     execv(exe_path, argv);
-    perror("execv");
-    exit(1);
+    return -1;
 #endif
 }
 
-void cbuild_self_rebuild_if_needed(int argc, char **argv, const char **sources,
-                                   int sources_count) {
+int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, const char** sources,
+                                  int sources_count) {
     char exe_path[512];
 #ifdef _WIN32
     GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
+#elif defined(__APPLE__)
+    uint32_t sz = sizeof(exe_path);
+    if (_NSGetExecutablePath(exe_path, &sz) != 0) {
+        strncpy(exe_path, argv[0], sizeof(exe_path));
+    }
 #else
     ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
     if (len > 0)
@@ -774,26 +585,37 @@ void cbuild_self_rebuild_if_needed(int argc, char **argv, const char **sources,
     snprintf(old_path, sizeof(old_path), "%s.old", exe_path);
     remove(old_path);
 
+    // Pick the main build source: the first item passed to CBUILD_SELF_REBUILD(...)
+    const char* build_src = (sources_count > 0 && sources[0] && *sources[0])
+                                ? sources[0]
+                                : "build.c";  // conservative fallback
+
     if (cbuild__needs_rebuild(exe_path, sources, sources_count)) {
-        printf("cbuild: Detected changes, rebuilding build executable...\n");
-        fflush(stdout);
+        cbuild__log(ctx, CBUILD_LOG_INFO, "cbuild: Detected changes, rebuilding build executable from %s...", build_src);
         rename(exe_path, old_path);
 
+        char cmd[1024];
 #ifdef _WIN32
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "cl /nologo /Fe:%s build.c /I. /Iinclude",
-                 exe_path);
+        snprintf(cmd, sizeof(cmd),
+                 "cl /nologo /Fe:\"%s\" \"%s\" /I. /Iinclude",
+                 exe_path, build_src);
 #else
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "cc -o '%s' build.c -I. -Iinclude", exe_path);
+        snprintf(cmd, sizeof(cmd),
+                 "cc -o \"%s\" \"%s\" -I. -Iinclude",
+                 exe_path, build_src);
 #endif
         int rc = system(cmd);
         if (rc != 0) {
-            fprintf(stderr, "cbuild: Self-rebuild failed!\n");
-            exit(1);
+            cbuild__set_error(ctx, "Self-rebuild failed with exit code %d", rc);
+            cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Self-rebuild failed!");
+            return -1;
         }
-        cbuild__exec_new_build(exe_path, argc, argv);
+        if (cbuild__exec_new_build(exe_path, argc, argv) != 0) {
+            cbuild__set_error(ctx, "Failed to exec new build executable");
+            return -1;
+        }
     }
+    return 0;
 }
 
 /* --- Data Structures for Build Targets, Commands, and Build Config --- */
@@ -802,204 +624,726 @@ typedef enum {
     TARGET_EXECUTABLE,
     TARGET_STATIC_LIB,
     TARGET_SHARED_LIB,
-    TARGET_COMMAND
+    TARGET_COMMAND,
+    TARGET_DUMMY,
+    TARGET_FILE_DEP
 } cbuild_target_type;
 
+typedef enum {
+    CBUILD_CC_GCC_CLANG,
+    CBUILD_CC_MSVC
+} cbuild_cc_kind_t;
+
+/* Global list of subcommands */
+typedef struct cbuild_subcommand {
+    char* name;
+    target_t* target;
+    char* command_line;
+    cbuild_subcommand_callback callback;
+    void* user_data;
+} cbuild_subcommand_t;
+
+typedef struct {
+    char* directory;
+    char* command;
+    char** arguments;
+    int argc;
+    char* file;
+} compile_commands_entry_t;
+
+typedef struct cbuild_flag_handler {
+    char* long_name;
+    char short_name;
+    int takes_value;
+    cbuild_flag_phase_t phase;
+    char* help;
+    cbuild_flag_callback cb;
+    void* user_data;
+    /* direct bindings for convenience variants */
+    int* bind_bool;
+    int* bind_int;
+    const char** bind_str;
+    char* allocated_str;  /* owned copy of string value, freed on reset */
+} cbuild_flag_handler_t;
+
+typedef struct {
+    target_t* target;
+    int source_index;
+} compile_job_t;
+
+typedef struct cbuild_subproject_target {
+    char* name;                          // logical name (e.g. "zlib")
+    char* type;                          // "static_lib", "shared_lib", "executable"
+    char* output_path;                   // relative to subproject directory
+    struct cbuild_target* proxy_target;  // created on demand
+} cbuild_subproject_target_t;
+
+struct cbuild_subproject {
+    char* alias;
+    char* directory;
+    char* cbuild_exe;
+    command_t* build_cmd;
+    int manifest_loaded;
+    cbuild_subproject_target_t* targets;
+    int target_count, target_cap;
+};
+
+/* The main context structure that holds all build state */
+struct cbuild_context {
+    /* Compiler kind */
+    cbuild_cc_kind_t cc_kind;
+
+    /* Logging callback and user data */
+    cbuild_log_fn log_fn;
+    void* log_user_data;
+
+    /* Target list */
+    target_t** targets;
+    int target_count;
+    int target_cap;
+
+    /* Command list */
+    command_t** commands;
+    int command_count;
+    int command_cap;
+
+    /* Build settings */
+    char* output_dir;
+    int parallel_jobs;
+    char* cc;
+    char* ar;
+    char* ld;
+    char** global_cflags;
+    int global_cflag_count;
+    int global_cflag_cap;
+    char** global_ldflags;
+    int global_ldflag_count;
+    int global_ldflag_cap;
+    int verbose;
+    char** target_filters;
+    int target_filter_count;
+    int target_filter_cap;
+
+    /* Build configurations */
+    config_t* default_config;
+    config_t* active_config;
+    target_t** cfg_targets;
+    config_t** cfg_values;
+    int cfg_count;
+    int cfg_cap;
+
+    /* All configs created via cbuild_config_new (for automatic cleanup) */
+    config_t** all_configs;
+    int all_configs_count;
+    int all_configs_cap;
+
+    /* DFS state */
+    int* visited;
+    int* in_stack;
+
+    /* Global defines */
+    char** global_defines;
+    int global_def_count;
+    int global_def_cap;
+
+    /* Subcommands */
+    cbuild_subcommand_t** subcommands;
+    int subcommand_count;
+    int subcommand_cap;
+
+    /* Compile commands generation */
+    int generate_compile_commands;
+    compile_commands_entry_t* cc_entries;
+    int cc_count;
+    int cc_cap;
+
+    /* Flag handlers */
+    cbuild_flag_handler_t* flag_handlers;
+    int flag_count;
+    int flag_cap;
+
+    /* Help display */
+    const char* argv0_for_help;
+
+    /* Job queue for parallel compilation */
+    compile_job_t* job_queue;
+    int job_count;
+    int job_capacity;
+    int jobs_completed;
+
+    /* Threading primitives */
+#ifdef _WIN32
+    HANDLE* threads;
+    HANDLE job_semaphore;
+    CRITICAL_SECTION queue_mutex;
+#else
+    pthread_t* threads;
+    sem_t job_semaphore;
+    pthread_mutex_t queue_mutex;
+#endif
+
+    /* Build error flag */
+    int build_error;
+
+    /* Last error message for error propagation */
+    char last_error[512];
+
+    /* Subprojects */
+    subproject_t** subprojects;
+    int subproject_count;
+    int subproject_cap;
+
+    /* Run subcommand name */
+    const char* run_subcmd;
+
+    /* User data for embedders */
+    void* user_data;
+};
+
+static void cbuild__default_logger(void* user_data, cbuild_log_level_t level, const char* msg) {
+    (void)user_data;
+    FILE* out = (level == CBUILD_LOG_ERROR || level == CBUILD_LOG_WARNING || level == CBUILD_LOG_STATUS_FAIL) ? stderr : stdout;
+    switch (level) {
+        case CBUILD_LOG_INFO:
+            fprintf(out, "%s\n", msg);
+            break;
+        case CBUILD_LOG_WARNING:
+            fprintf(out, "%sWarning:%s %s\n", CBUILD_COLOR_YELLOW, CBUILD_COLOR_RESET, msg);
+            break;
+        case CBUILD_LOG_ERROR:
+            fprintf(out, "%sError:%s %s\n", CBUILD_COLOR_RED, CBUILD_COLOR_RESET, msg);
+            break;
+        case CBUILD_LOG_STEP: {
+            const char* space = strchr(msg, ' ');
+            if (space) {
+                int label_len = (int)(space - msg);
+                fprintf(out, "%s%-10.*s%s %s\n", CBUILD_COLOR_BLUE, label_len, msg, CBUILD_COLOR_RESET, space + 1);
+            } else {
+                fprintf(out, "%s%-10s%s\n", CBUILD_COLOR_BLUE, msg, CBUILD_COLOR_RESET);
+            }
+            break;
+        }
+        case CBUILD_LOG_STATUS_OK:
+            fprintf(out, "%s%s%s %s\n", CBUILD_COLOR_GREEN, "✔", CBUILD_COLOR_RESET, msg);
+            break;
+        case CBUILD_LOG_STATUS_FAIL:
+            fprintf(out, "%s%s%s %s\n", CBUILD_COLOR_RED, "✖", CBUILD_COLOR_RESET, msg);
+            break;
+        case CBUILD_LOG_VERBOSE:
+            fprintf(out, "%s\n", msg);
+            break;
+    }
+    fflush(out);
+}
+
+static void cbuild__log(cbuild_context_t* ctx, cbuild_log_level_t level, const char* fmt, ...) {
+    char buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    cbuild_log_fn fn = ctx->log_fn ? ctx->log_fn : cbuild__default_logger;
+    fn(ctx->log_user_data, level, buf);
+}
+
+static void cbuild__log_step(cbuild_context_t* ctx, const char* label, const char* color, const char* fmt, ...) {
+    (void)color;
+    char buf[2048];
+    char msg[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    snprintf(msg, sizeof(msg), "%s ", label);
+    size_t used = strlen(msg);
+    strncat(msg, buf, sizeof(msg) - used - 1);
+    cbuild_log_fn fn = ctx->log_fn ? ctx->log_fn : cbuild__default_logger;
+    fn(ctx->log_user_data, CBUILD_LOG_STEP, msg);
+}
+
+static void cbuild__log_status(cbuild_context_t* ctx, int ok, const char* fmt, ...) {
+    char buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    cbuild_log_fn fn = ctx->log_fn ? ctx->log_fn : cbuild__default_logger;
+    fn(ctx->log_user_data, ok ? CBUILD_LOG_STATUS_OK : CBUILD_LOG_STATUS_FAIL, buf);
+}
+
+void cbuild_set_logger(cbuild_context_t* ctx, cbuild_log_fn callback, void* user_data) {
+    ctx->log_fn = callback;
+    ctx->log_user_data = user_data;
+}
+
+const char* cbuild_get_last_error(cbuild_context_t* ctx) {
+    if (!ctx) return "NULL context";
+    return ctx->last_error[0] ? ctx->last_error : NULL;
+}
+
+static void cbuild__set_error(cbuild_context_t* ctx, const char* fmt, ...) {
+    if (!ctx) return;
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(ctx->last_error, sizeof(ctx->last_error), fmt, args);
+    va_end(args);
+}
+
+void cbuild_set_user_data(cbuild_context_t* ctx, void* data) {
+    if (ctx) ctx->user_data = data;
+}
+
+void* cbuild_get_user_data(cbuild_context_t* ctx) {
+    return ctx ? ctx->user_data : NULL;
+}
+
+/* Context constructor - allocates and initializes a new build context */
+cbuild_context_t* cbuild_context_new(void) {
+    cbuild_context_t* ctx = (cbuild_context_t*)calloc(1, sizeof(cbuild_context_t));
+    if (!ctx) return NULL;
+
+    /* Initialize with defaults */
+    ctx->cc_kind = CBUILD_CC_GCC_CLANG;
+    ctx->argv0_for_help = "cbuild";
+
+#ifndef _WIN32
+    pthread_mutex_init(&ctx->queue_mutex, NULL);
+#endif
+
+    return ctx;
+}
+
+/* Context destructor - frees all resources owned by the context */
+void cbuild_teardown(cbuild_context_t* ctx);
+
+void cbuild_context_free(cbuild_context_t* ctx) {
+    if (!ctx) return;
+
+    /* Use cbuild_teardown to free all internal state without reinitializing */
+    cbuild_teardown(ctx);
+
+#ifndef _WIN32
+    pthread_mutex_destroy(&ctx->queue_mutex);
+#endif
+
+    /* Free the context itself */
+    free(ctx);
+}
+
 struct cbuild_command {
-    char *name;
-    char *command_line;
-    command_t **dependencies;
+    char* name;
+    char* command_line;
+    char** argv;
+    int argc;
+    cbuild_subcommand_callback callback;
+    void* user_data;
+    command_t** dependencies;
     int dep_count, dep_cap;
-    int executed;  // internal: has this command been executed?
-    int result;    // internal: result code after execution
+    int executed;
+    int result;
+};
+
+struct cbuild_config {
+    const char* name;
+
+    char** cflags;
+    int ncflags;
+    int cflags_cap;
+    char** ldflags;
+    int nldflags;
+    int ldflags_cap;
+    char** defines;
+    int ndefines;
+    int defines_cap;
+    char** includes;
+    int nincludes;
+    int includes_cap;
+    char** libdirs;
+    int nlibdirs;
+    int libdirs_cap;
+    char** linklibs;
+    int nlinklibs;
+    int linklibs_cap;
+
+    // structured knobs (portable intent → flags later)
+    int opt_level;        // 0..3, or -1 = leave alone
+    int debug_symbols;    // bool
+    int lto;              // 0=off, 1=on, 2=thin
+    int pic;              // bool
+    int warnings;         // 0=default, 1=all, 2=pedantic
+    int freestanding;     // bool
+    const char* output_dir;  // custom build dir for this config
+    const char* std;      // "c11","c17","gnu11", etc.
+    const char* runtime;  // "static","dynamic" (where it makes sense)
+    int sanitize;         // bitmask: ASAN|UBSAN|TSAN|… (0 none)
+
+    // per-config tool overrides
+    const char* compiler; // Override global g_cc
+    const char* linker;   // Override global g_ld
 };
 
 /* Structure representing a build target (executable or library) */
 struct cbuild_target {
     cbuild_target_type type;
-    char *name;      // base name of target
-    char **sources;  // array of source file paths
+    char* name;      // base name of target
+    char** sources;  // array of source file paths
     int sources_count;
     int sources_cap;
-    char **include_dirs;  // array of include directory paths
+    char** include_dirs;  // array of include directory paths
     int include_count;
     int include_cap;
-    char **lib_dirs;  // library directories for linking
+    char** lib_dirs;  // library directories for linking
     int lib_dir_count;
     int lib_dir_cap;
-    char **link_libs;  // external libraries to link (names or paths)
+    char** link_libs;  // external libraries to link (names or paths)
     int link_lib_count;
     int link_lib_cap;
-    target_t *
-        *dependencies;  // other targets this target depends on (to link against)
+    char** exposed_libs;
+    int exposed_lib_count;
+    int exposed_lib_cap;
+    target_t** dependencies;  // other targets this target depends on (to link against)
     int dep_count;
     int dep_cap;
-    char *cflags;          // extra compile flags specific to this target
-    char *ldflags;         // extra linker flags specific to this target
-    char *output_file;     // path to final output (exe, .a, .dll/.so)
-    char *obj_dir;         // directory for this target's object files (and .d files)
-    command_t **commands;  // commands to run before building this target
+    char** cflags;  // compile flags tokens specific to this target
+    int cflag_count;
+    int cflag_cap;
+    char** ldflags;  // linker flags tokens specific to this target
+    int ldflag_count;
+    int ldflag_cap;
+    char* output_file;     // path to final output (exe, .a, .dll/.so)
+    char* obj_dir;         // directory for this target's object files (and .d files)
+    command_t** commands;  // commands to run before building this target
     int cmd_count, cmd_cap;
-    command_t **post_commands;  // commands to run after building this target
+    command_t** post_commands;  // commands to run after building this target
     int post_cmd_count, post_cmd_cap;
-    char **defines; /* “FOO”   or “BAR=42” */
+    char** defines;
     int define_count;
     int define_cap;
+    char* soname;  // SONAME (Linux) or install_name (macOS) for shared libraries
+    int config_applied;
+    int external;  // output is produced by a subproject, not linked by this context
+
+    // per-target tool overrides (from config or explicit)
+    char* compiler;        // Override global g_cc for this target
+    char* linker;          // Override global g_ld for this target
+    int cc_kind_override;  // -1 = use global g_cc_kind, else cbuild_cc_kind_t
 };
 
-/* Global list of targets */
-static target_t **g_targets = NULL;
-static int g_target_count = 0;
-static int g_target_cap = 0;
-
-/* Global list of commands */
-static command_t **g_commands = NULL;
-static int g_command_count = 0, g_command_cap = 0;
-
-/* Global build settings */
-static char *g_output_dir =
-    NULL;  // base output directory for build files (default "build")
-static int g_parallel_jobs =
-    0;                     // number of parallel compile jobs (0 means not set yet)
-static char *g_cc = NULL;  // C compiler command (gcc, clang, cl, etc.)
-static char *g_ar = NULL;  // static library archiver command (ar or lib)
-static char *g_ld =
-    NULL;  // linker command if needed (usually same as compiler for exec/shared)
-static char *g_global_cflags =
-    NULL;                              // global compiler flags (like debug symbols, optimizations)
-static char *g_global_ldflags = NULL;  // global linker flags
-
-/* --- global macro definitions (apply to every target) -------------- */
-static char **g_global_defines = NULL;
-static int g_global_def_count = 0;
-static int g_global_def_cap = 0;
-
-/* Global list of subcommands */
-typedef struct cbuild_subcommand {
-    char *name;
-    target_t *target;
-    char *command_line;
-    cbuild_subcommand_callback callback;
-    void *user_data;
-} cbuild_subcommand_t;
-
-static cbuild_subcommand_t **g_subcommands = NULL;
-static int g_subcommand_count = 0, g_subcommand_cap = 0;
-
-/* --- compile_commands.json support --- */
-static int g_generate_compile_commands = 0;
-typedef struct {
-    char *directory;
-    char *command;
-    char *file;
-} compile_commands_entry_t;
-static compile_commands_entry_t *g_cc_entries = NULL;
-static int g_cc_count = 0, g_cc_cap = 0;
-
-// Public API implementation
-void cbuild_enable_compile_commands(int enabled) {
-    g_generate_compile_commands = enabled;
+static void cbuild__register_flag(cbuild_context_t* ctx, cbuild_flag_handler_t fh) {
+    if (ctx->flag_count + 1 > ctx->flag_cap) {
+        ctx->flag_cap = ctx->flag_cap ? ctx->flag_cap * 2 : 8;
+        ctx->flag_handlers = (cbuild_flag_handler_t*)realloc(
+            ctx->flag_handlers, ctx->flag_cap * sizeof(*ctx->flag_handlers));
+    }
+    ctx->flag_handlers[ctx->flag_count++] = fh;
 }
 
-/* Forward declarations of internal utility functions */
-static void cbuild_init();  // initialize defaults
-static target_t *cbuild_create_target(const char *name,
-                                       cbuild_target_type type);
-static void ensure_capacity_charpp(char ***arr, int *count, int *capacity);
-static void append_str(char **dst, const char *src);
-static void append_format(char **dst, const char *fmt, ...);
-static int ensure_dir_exists(const char *path);
-static int run_command(const char *cmd, int capture_out,
-                        char **captured_output);
-static int compile_source(const char *src_file, const char *obj_file,
-                           const char *dep_file, target_t *t);
-static void collect_compile_commands_for_target(target_t *t);
-static int need_recompile(const char *src_file, const char *obj_file,
-                           const char *dep_file);
-static int link_target(target_t *t);
-static void remove_file(const char *path);
-static void remove_dir_recursive(const char *path);
-static void schedule_compile_jobs(target_t *t, int *error_flag);
-static void build_target(target_t *t, int *error_flag);
-static int cbuild_match_wildcard(const char *pattern, const char *string);
-static int cbuild_expand_wildcard(const char *pattern, char ***files,
-                                   int *file_count);
-static int cbuild_expand_wildcard_recursive(const char *dir_path,
-                                             const char *pattern, char ***files,
-                                             int *file_count, int *capacity);
-static int cbuild_add_to_file_list(char ***files, int *file_count,
-                                    int *capacity, const char *path);
+void cbuild_register_flag(cbuild_context_t* ctx, const char* long_name, char short_name, int takes_value,
+                          cbuild_flag_phase_t phase, const char* help,
+                          cbuild_flag_callback cb, void* user_data) {
+    cbuild_flag_handler_t fh = (cbuild_flag_handler_t){ 0 };
+    if (long_name) fh.long_name = strdup(long_name);
+    fh.short_name = short_name;
+    fh.takes_value = takes_value ? 1 : 0;
+    fh.phase = phase;
+    fh.help = help ? strdup(help) : NULL;
+    fh.cb = cb;
+    fh.user_data = user_data;
+    cbuild__register_flag(ctx, fh);
+}
 
-/* Structures and funcs for thread pool (for parallel compilation) */
-#ifdef _WIN32
-static HANDLE *g_thread_handles = NULL;
-static int g_thread_count = 0;
-static CRITICAL_SECTION g_job_mutex;
-#else
-static pthread_t *g_thread_ids = NULL;
-static int g_thread_count = 0;
-static pthread_mutex_t g_job_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
-static int g_next_job_index = 0;  // index of next compile job to pick
+void cbuild_register_flag_bool(cbuild_context_t* ctx, const char* long_name, char short_name,
+                               cbuild_flag_phase_t phase, const char* help,
+                               int* out_bool) {
+    cbuild_flag_handler_t fh = (cbuild_flag_handler_t){ 0 };
+    if (long_name) fh.long_name = strdup(long_name);
+    fh.short_name = short_name;
+    fh.phase = phase;
+    fh.help = help ? strdup(help) : NULL;
+    fh.bind_bool = out_bool;
+    cbuild__register_flag(ctx, fh);
+}
+
+void cbuild_register_flag_int(cbuild_context_t* ctx, const char* long_name, char short_name,
+                              cbuild_flag_phase_t phase, const char* help,
+                              int* out_int) {
+    cbuild_flag_handler_t fh = (cbuild_flag_handler_t){ 0 };
+    if (long_name) fh.long_name = strdup(long_name);
+    fh.short_name = short_name;
+    fh.takes_value = 1;
+    fh.phase = phase;
+    fh.help = help ? strdup(help) : NULL;
+    fh.bind_int = out_int;
+    cbuild__register_flag(ctx, fh);
+}
+
+void cbuild_register_flag_str(cbuild_context_t* ctx, const char* long_name, char short_name,
+                              cbuild_flag_phase_t phase, const char* help,
+                              const char** out_str) {
+    cbuild_flag_handler_t fh = (cbuild_flag_handler_t){ 0 };
+    if (long_name) fh.long_name = strdup(long_name);
+    fh.short_name = short_name;
+    fh.takes_value = 1;
+    fh.phase = phase;
+    fh.help = help ? strdup(help) : NULL;
+    fh.bind_str = out_str;
+    cbuild__register_flag(ctx, fh);
+}
+
+/* Check if a flag is present in argv (for early/pre-cbuild_run parsing) */
+int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_name) {
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (!arg) continue;
+
+        /* Check --long_name */
+        if (long_name && arg[0] == '-' && arg[1] == '-') {
+            if (strcmp(arg + 2, long_name) == 0) return 1;
+        }
+        /* Check -X short flag */
+        if (short_name && arg[0] == '-' && arg[1] != '-') {
+            /* Could be -s or -abc (bundled) */
+            for (int j = 1; arg[j]; j++) {
+                if (arg[j] == short_name) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void cbuild__print_help(cbuild_context_t* ctx) {
+    char buf[4096];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "Usage: %s [flags]\n\nFlags:", ctx->argv0_for_help);
+    const char* phase_names[] = { "Pre-parse", "Before build", "After build" };
+    for (int ph = CBUILD_FLAG_PRE; ph <= CBUILD_FLAG_AFTER_BUILD; ++ph) {
+        int header = 0;
+        for (int i = 0; i < ctx->flag_count; ++i) {
+            cbuild_flag_handler_t* fh = &ctx->flag_handlers[i];
+            if (fh->phase != (cbuild_flag_phase_t)ph) continue;
+            if (!header) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "\n\n  %s:\n", phase_names[ph]);
+                header = 1;
+            }
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "    ");
+            if (fh->short_name) pos += snprintf(buf + pos, sizeof(buf) - pos, "-%c", fh->short_name);
+            if (fh->short_name && fh->long_name) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
+            if (fh->long_name) pos += snprintf(buf + pos, sizeof(buf) - pos, "--%s", fh->long_name);
+            if (fh->takes_value) pos += snprintf(buf + pos, sizeof(buf) - pos, " <val>");
+            if (fh->help) pos += snprintf(buf + pos, sizeof(buf) - pos, "\n        %s", fh->help);
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
+        }
+    }
+    if (ctx->subcommand_count > 0) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\nSubcommands:\n");
+        for (int i = 0; i < ctx->subcommand_count; ++i) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "    %s\n", ctx->subcommands[i]->name);
+        }
+    }
+    cbuild__log(ctx, CBUILD_LOG_INFO, "%s", buf);
+}
+
+/* strict dispatcher:
+   - consumes handled flags from argv (compacting)
+   - errors on any unknown token that *looks* like a flag (- or --)
+   - honors "--" to stop flag parsing
+*/
+static int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_flag_phase_t phase,
+                                        int* argc, char*** argvp) {
+    int ac = *argc;
+    char** av = *argvp;
+    int write = 1;
+    int stop = 0;
+
+    for (int read = 1; read < ac; ++read) {
+        const char* arg = av[read];
+
+        if (stop || !arg || arg[0] != '-' || arg[1] == '\0') {
+            av[write++] = av[read];
+            continue;
+        }
+
+        if (strcmp(arg, "--") == 0) {
+            stop = 1;
+            continue;
+        }
+
+        int handled = 0;
+        const char* val = NULL;
+        int consume_next = 0;
+
+        if (arg[1] == '-') {
+            /* --long or --long=value */
+            const char* name = arg + 2;
+            const char* eq = strchr(name, '=');
+            char namebuf[256];
+            if (eq) {
+                size_t n = (size_t)(eq - name);
+                    if (n >= sizeof(namebuf)) n = sizeof(namebuf) - 1;
+                    memcpy(namebuf, name, n);
+                    namebuf[n] = 0;
+                    val = eq + 1;
+                    name = namebuf;
+                }
+                for (int i = 0; i < ctx->flag_count; ++i) {
+                    cbuild_flag_handler_t* fh = &ctx->flag_handlers[i];
+                if (fh->phase != phase) continue;
+                if (!fh->long_name || strcmp(fh->long_name, name) != 0) continue;
+
+                if (fh->takes_value && !val) {
+                    if (read + 1 < ac) {
+                        val = av[read + 1];
+                        consume_next = 1;
+                    } else {
+                        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: --%s requires a value", name);
+                        return 1;
+                    }
+                }
+
+                if (fh->bind_bool) *fh->bind_bool = 1;
+                if (fh->bind_int && val) *fh->bind_int = atoi(val);
+                if (fh->bind_str && val) {
+                    /* Free any previously allocated string */
+                    if (fh->allocated_str) free(fh->allocated_str);
+                    fh->allocated_str = strdup(val);
+                    *fh->bind_str = fh->allocated_str;
+                }
+
+                int rc = fh->cb ? fh->cb(val, fh->user_data) : 0;
+                handled = 1;
+                if (consume_next) read++;
+                if (rc == CBUILD_FLAG_EXIT) return CBUILD_FLAG_EXIT;
+                if (rc) return rc;
+                break;
+            }
+        } else {
+            /* -xyz or -j8 or -j 8 */
+            const char* p = arg + 1;
+            while (*p && !handled) {
+                char s = *p++;
+                cbuild_flag_handler_t* fh = NULL;
+                for (int i = 0; i < ctx->flag_count; ++i) {
+                    if (ctx->flag_handlers[i].phase == phase &&
+                        ctx->flag_handlers[i].short_name == s) {
+                        fh = &ctx->flag_handlers[i];
+                        break;
+                    }
+                }
+                if (!fh) {
+                    cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unknown flag -%c", s);
+                    return 1;
+                }
+
+                if (fh->takes_value) {
+                    if (*p)
+                        val = p;
+                    else if (read + 1 < ac) {
+                        val = av[read + 1];
+                        consume_next = 1;
+                    } else {
+                        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: -%c requires a value", s);
+                        return 1;
+                    }
+                }
+
+                if (fh->bind_bool) *fh->bind_bool = 1;
+                if (fh->bind_int && val) *fh->bind_int = atoi(val);
+                if (fh->bind_str && val) {
+                    /* Free any previously allocated string */
+                    if (fh->allocated_str) free(fh->allocated_str);
+                    fh->allocated_str = strdup(val);
+                    *fh->bind_str = fh->allocated_str;
+                }
+
+                int rc = fh->cb ? fh->cb(val, fh->user_data) : 0;
+                handled = 1;
+                if (consume_next) read++;
+                if (rc == CBUILD_FLAG_EXIT) return CBUILD_FLAG_EXIT;
+                if (rc) return rc;
+                break; /* stop cluster if one took a value */
+            }
+        }
+
+        if (!handled) {
+            cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unknown option '%s'", arg);
+            return 1;
+        }
+    }
+
+    av[write] = NULL;
+    *argc = write;
+    return 0;
+}
+
+static void cbuild_init(cbuild_context_t* ctx);  // initialize defaults
+static target_t* cbuild_create_target(cbuild_context_t* ctx, const char* name,
+                                      cbuild_target_type type);
+static int ensure_capacity_charpp(cbuild_context_t* ctx, char*** arr, int* count, int* capacity);
+static int append_format(char** dst, const char* fmt, ...);
+static void get_dir_from_path(const char* path, char* out_dir, size_t out_size);
+static int ensure_dir_exists(const char* path);
+static int run_command(cbuild_context_t* ctx, const char* cmd, int capture_out,
+                       char** captured_output);
+static int compile_source(cbuild_context_t* ctx, const char* src_file, const char* obj_file,
+                          const char* dep_file, target_t* t);
+static void collect_compile_commands_for_target(cbuild_context_t* ctx, target_t* t);
+static int need_recompile(cbuild_context_t* ctx, const char* src_file, const char* obj_file,
+                          const char* dep_file, target_t* t);
+static void remove_file(cbuild_context_t* ctx, const char* path);
+static void remove_dir_recursive(cbuild_context_t* ctx, const char* path);
+static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag);
+static int cbuild_add_to_file_list(char*** files, int* file_count,
+                                   int* capacity, const char* path);
+
+/* Thread worker argument - passes context to worker threads */
 typedef struct {
-    target_t *target;
-    int index;
-} compile_job_t;
-static compile_job_t *g_compile_jobs = NULL;
-static int g_compile_job_count = 0;
+    cbuild_context_t* ctx;
+} compile_worker_arg_t;
 
-/* Thread worker function prototype */
+// Thread function for compilation
 #ifdef _WIN32
-static DWORD WINAPI compile_thread_func(LPVOID param);
+static DWORD WINAPI compile_worker(void* arg);
 #else
-static void *compile_thread_func(void *param);
+static void* compile_worker(void* arg);
 #endif
 
-/* Helper macro to get max of two values */
+// Function to enqueue compilation jobs
+static void enqueue_compile_job(cbuild_context_t* ctx, target_t* target, int source_index);
+
+// Function to process all compilation jobs in parallel
+static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* target, int* error_flag);
+
 #define CBUILD_MAX(a, b) ((a) > (b) ? (a) : (b))
 
-/* --- Subproject types and helpers --- */
-typedef struct cbuild_subproject_target {
-    char *name;                          // logical name (e.g. "zlib")
-    char *type;                          // "static_lib", "shared_lib", "executable"
-    char *output_path;                   // relative to subproject directory
-    struct cbuild_target *proxy_target;  // created on demand
-} cbuild_subproject_target_t;
+/* --- Process Spawning API (for subproject builds) --- */
+typedef struct {
+    char** args;
+    int count;
+    int capacity;
+} cbuild_argv_t;
 
-struct cbuild_subproject {
-    char *alias;
-    char *directory;
-    char *cbuild_exe;
-    command_t
-        *build_cmd;  // command_t to build the subproject (runs cbuild --manifest)
-    int manifest_loaded;
-    cbuild_subproject_target_t *targets;
-    int target_count, target_cap;
-};
+static void cbuild_argv_init(cbuild_argv_t* argv);
+static void cbuild_argv_free(cbuild_argv_t* argv);
+static int cbuild_argv_append(cbuild_argv_t* argv, const char* arg);
+static char* cbuild_argv_to_cmdline(cbuild_argv_t* argv);
+static void cbuild_argv_append_flags(cbuild_argv_t* argv, const char* flags);
+static int cbuild_spawn_process(cbuild_context_t* ctx, cbuild_argv_t* argv, int capture_out, char** captured_output);
 
-static subproject_t **g_subprojects = NULL;
-static int g_subproject_count = 0, g_subproject_cap = 0;
-
-/* --- Implementation: Utility Functions --- */
-
-// Public Helper: check if a file exists
-int cbuild_file_exists(const char *path) {
+int cbuild_file_exists(const char* path) {
     if (!path || !*path)
         return 0;
     struct stat st;
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-// Public Helper: check if a directory exists
-int cbuild_dir_exists(const char *path) {
+int cbuild_dir_exists(const char* path) {
     if (!path || !*path)
         return 0;
     struct stat st;
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-// Public Helper: remove a file
-int cbuild_remove_file(const char *path) {
+int cbuild_remove_file(const char* path) {
     if (!path || !*path)
         return -1;
     if (!cbuild_file_exists(path))
@@ -1007,8 +1351,7 @@ int cbuild_remove_file(const char *path) {
     return unlink(path);
 }
 
-// Public Helper: remove a directory recursively
-int cbuild_remove_dir(const char *path) {
+int cbuild_remove_dir(const char* path) {
     if (!path || !*path)
         return -1;
     if (!cbuild_dir_exists(path))
@@ -1018,8 +1361,8 @@ int cbuild_remove_dir(const char *path) {
     snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", path);
     return system(cmd);
 #else
-    DIR *dir;
-    struct dirent *entry;
+    DIR* dir;
+    struct dirent* entry;
     char full_path[PATH_MAX];
     if (!(dir = opendir(path)))
         return -1;
@@ -1045,43 +1388,34 @@ int cbuild_remove_dir(const char *path) {
 #endif
 }
 
-// Public Helper: get the current working directory
-int cbuild_get_cwd(char *buf, long size) {
+int cbuild_get_cwd(char* buf, long size) {
     if (!buf || size <= 0)
         return -1;
     return getcwd(buf, size) ? 0 : -1;
 }
 
-/**
- * Simple wildcard pattern matching function.
- *
- * @param pattern The pattern to match against (supports * and ? wildcards)
- * @param string  The string to check
- * @return        1 if the string matches the pattern, 0 otherwise
- *
- * Supports:
- *   - * (match 0 or more characters)
- *   - ? (match any single character)
- */
-static int cbuild_match_wildcard(const char *pattern, const char *string) {
+void cbuild_enable_compile_commands(cbuild_context_t* ctx, int enabled) {
+    ctx->generate_compile_commands = enabled;
+}
+
+void cbuild_set_verbose(cbuild_context_t* ctx, int verbose) {
+    ctx->verbose = verbose;
+}
+
+int cbuild_match_wildcard(const char* pattern, const char* string) {
     if (!pattern || !string)
         return 0;
 
-    // End of pattern reached
     if (*pattern == '\0')
         return *string == '\0';
 
-    // Handle wildcard *
     if (*pattern == '*') {
-        // Skip consecutive * characters (but not ** which has special meaning)
         if (*(pattern + 1) == '*' && *(pattern + 2) != '*')
             pattern++;
 
-        // * at the end of the pattern matches anything
         if (*(pattern + 1) == '\0')
             return 1;
 
-        // Try to match the rest of the pattern with every substring
         while (*string) {
             if (cbuild_match_wildcard(pattern + 1, string))
                 return 1;
@@ -1090,7 +1424,6 @@ static int cbuild_match_wildcard(const char *pattern, const char *string) {
         return cbuild_match_wildcard(pattern + 1, string);
     }
 
-    // Handle ? or exact match
     if (*pattern == '?' || *pattern == *string) {
         return cbuild_match_wildcard(pattern + 1, string + 1);
     }
@@ -1098,30 +1431,11 @@ static int cbuild_match_wildcard(const char *pattern, const char *string) {
     return 0;
 }
 
-/**
- * Helper functions for recursive pattern matching and file expansion
- */
-
-/**
- * Expands a wildcard pattern to a list of matching files.
- *
- * @param pattern    The pattern to expand (e.g. "src/*.c" or "src/**'/*.c")
- * @param files      Output pointer to array of strings that will be filled with
- * matching files
- * @param file_count Output pointer to an integer that will be set to the number
- * of files found
- * @return           0 on success or -1 on error
- *
- * Supports:
- *   - Basic wildcards: "src/*.c" matches all .c files in src directory
- *   - Recursive wildcards: "src/**'/*.c" matches all .c files in src and all
- * subdirectories
- */
-static int cbuild_expand_wildcard(const char *pattern, char ***files,
-                                  int *file_count) {
+int cbuild_expand_wildcard(const char* pattern, char*** files,
+                           int* file_count) {
     char dir_path[PATH_MAX] = { 0 };
     char base_pattern[PATH_MAX] = { 0 };
-    int capacity = 32;  // Initial capacity
+    int capacity = 32;
 
     if (!pattern || !files || !file_count)
         return -1;
@@ -1129,36 +1443,29 @@ static int cbuild_expand_wildcard(const char *pattern, char ***files,
     *files = NULL;
     *file_count = 0;
 
-    // Extract directory part and filename pattern
-    const char *last_slash = strrchr(pattern, '/');
-    const char *last_backslash = strrchr(pattern, '\\');
-    const char *separator = last_slash ? last_slash : last_backslash;
+    const char* last_slash = strrchr(pattern, '/');
+    const char* last_backslash = strrchr(pattern, '\\');
+    const char* separator = last_slash ? last_slash : last_backslash;
 
     if (!separator) {
-        // No directory part, use current directory
         strcpy(dir_path, ".");
         strcpy(base_pattern, pattern);
     } else {
-        // Extract directory part
         size_t dir_len = separator - pattern;
         strncpy(dir_path, pattern, dir_len);
         dir_path[dir_len] = '\0';
 
-        // Extract base pattern
         strcpy(base_pattern, separator + 1);
     }
 
-    // Allocate memory for file list
-    *files = (char **)malloc(capacity * sizeof(char *));
+    *files = (char**)malloc(capacity * sizeof(char*));
     if (!*files)
         return -1;
 
-    // Begin recursive expansion from the base directory
     int result = cbuild_expand_wildcard_recursive(dir_path, base_pattern, files,
                                                   file_count, &capacity);
 
     if (result != 0 && *files) {
-        // Clean up on error
         for (int i = 0; i < *file_count; i++) {
             free((*files)[i]);
         }
@@ -1170,30 +1477,44 @@ static int cbuild_expand_wildcard(const char *pattern, char ***files,
     return result;
 }
 
-/**
- * Helper function to add a file to the result list.
- * Handles memory allocation and growth of the file list array.
- *
- * @param files      Pointer to the array of file paths
- * @param file_count Pointer to the current count of files
- * @param capacity   Pointer to the current capacity of the array
- * @param path       The file path to add to the list
- * @return           0 on success, -1 on failure
- */
-static int cbuild_add_to_file_list(char ***files, int *file_count,
-                                   int *capacity, const char *path) {
-    // Grow array if needed
+static cbuild_cc_kind_t detect_cc_kind(const char* exe) {
+    if (!exe) return CBUILD_CC_GCC_CLANG;
+    const char* base = strrchr(exe, '/');
+    if (!base) base = exe;
+    const char* b2 = strrchr(base, '\\');
+    if (b2) base = b2 + 1;
+    if (strstr(base, "clang")) return CBUILD_CC_GCC_CLANG;
+    if (strstr(base, "cl")) return CBUILD_CC_MSVC;
+    if (strstr(base, "icl")) return CBUILD_CC_MSVC;
+    return CBUILD_CC_GCC_CLANG;
+}
+
+/* Detect if archiver is MSVC-style (lib.exe) or Unix-style (ar, zig ar, llvm-ar, etc.) */
+static cbuild_cc_kind_t detect_ar_kind(const char* ar) {
+    if (!ar) return CBUILD_CC_GCC_CLANG;
+    const char* base = strrchr(ar, '/');
+    if (!base) base = ar;
+    const char* b2 = strrchr(base, '\\');
+    if (b2) base = b2 + 1;
+    /* MSVC archiver is "lib" or "lib.exe" */
+    if (strcmp(base, "lib") == 0 || strcmp(base, "lib.exe") == 0) return CBUILD_CC_MSVC;
+    /* Everything else (ar, zig ar, llvm-ar, etc.) is Unix-style */
+    return CBUILD_CC_GCC_CLANG;
+}
+
+static int cbuild_add_to_file_list(char*** files, int* file_count,
+                                   int* capacity, const char* path) {
     if (*file_count >= *capacity) {
         *capacity *= 2;
-        char **new_files = (char **)realloc(*files, *capacity * sizeof(char *));
+        char** new_files = (char**)realloc(*files, *capacity * sizeof(char*));
         if (!new_files) {
             return -1;
         }
         *files = new_files;
     }
 
-    // Add path to the result
-    (*files)[*file_count] = strdup(path);
+    /* Normalize path separators for consistent hashing on Windows */
+    (*files)[*file_count] = cbuild__normalize_path(path);
     if (!(*files)[*file_count]) {
         return -1;
     }
@@ -1202,33 +1523,15 @@ static int cbuild_add_to_file_list(char ***files, int *file_count,
     return 0;
 }
 
-/**
- * Recursively expands wildcard patterns and handles ** for directory traversal.
- * This is the workhorse function that handles directory traversal and pattern
- * matching.
- *
- * @param dir_path   The directory to search in
- * @param pattern    The pattern to match against files (can include
- * subdirectory parts)
- * @param files      Pointer to the array of file paths
- * @param file_count Pointer to the current count of files
- * @param capacity   Pointer to the current capacity of the array
- * @return           0 on success, -1 on failure
- */
-static int cbuild_expand_wildcard_recursive(const char *dir_path,
-                                            const char *pattern, char ***files,
-                                            int *file_count, int *capacity) {
-    DIR *dir;
-    struct dirent *entry;
-
-    // Handle special case for ** pattern
+int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
+                                     char*** files, int* file_count,
+                                     int* capacity) {
     int recursive_search = 0;
     char next_pattern[PATH_MAX] = { 0 };
 
     if (strncmp(pattern, "**", 2) == 0) {
         recursive_search = 1;
 
-        // Extract the rest of the pattern after **
         if (pattern[2] == '/' || pattern[2] == '\\') {
             strcpy(next_pattern, pattern + 3);
         } else {
@@ -1236,19 +1539,76 @@ static int cbuild_expand_wildcard_recursive(const char *dir_path,
         }
     }
 
-    // Open directory
+#ifdef _WIN32
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind;
+    char search_path[PATH_MAX];
+
+    snprintf(search_path, sizeof(search_path), "%s\\*", dir_path);
+
+    hFind = FindFirstFileA(search_path, &find_data);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    do {
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0)
+            continue;
+
+        char full_path[PATH_MAX];
+        if (strcmp(dir_path, ".") == 0) {
+            snprintf(full_path, sizeof(full_path), "%s", find_data.cFileName);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s\\%s", dir_path, find_data.cFileName);
+        }
+
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (recursive_search) {
+                if (next_pattern[0]) {
+                    cbuild_expand_wildcard_recursive(full_path, next_pattern, files,
+                                                     file_count, capacity);
+                }
+
+                cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count,
+                                                 capacity);
+            } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {
+                const char* slash = strchr(pattern, '/');
+                if (!slash)
+                    slash = strchr(pattern, '\\');
+
+                char subdir_pattern[PATH_MAX] = { 0 };
+                strncpy(subdir_pattern, pattern, slash - pattern);
+                subdir_pattern[slash - pattern] = '\0';
+
+                if (cbuild_match_wildcard(subdir_pattern, find_data.cFileName)) {
+                    cbuild_expand_wildcard_recursive(full_path, slash + 1, files,
+                                                     file_count, capacity);
+                }
+            }
+        } else if (!recursive_search &&
+                   cbuild_match_wildcard(pattern, find_data.cFileName)) {
+            if (cbuild_add_to_file_list(files, file_count, capacity, full_path) !=
+                0) {
+                FindClose(hFind);
+                return -1;
+            }
+        }
+    } while (FindNextFileA(hFind, &find_data));
+
+    FindClose(hFind);
+#else
+    DIR* dir;
+    struct dirent* entry;
+
     dir = opendir(dir_path);
     if (!dir) {
         return -1;
     }
 
-    // Read directory entries and check for matches
     while ((entry = readdir(dir))) {
-        // Skip "." and ".." entries
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
-        // Construct the full path
         char full_path[PATH_MAX];
         if (strcmp(dir_path, ".") == 0) {
             snprintf(full_path, sizeof(full_path), "%s", entry->d_name);
@@ -1256,23 +1616,18 @@ static int cbuild_expand_wildcard_recursive(const char *dir_path,
             snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
         }
 
-        // Check if this is a directory
         struct stat st;
         if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
             if (recursive_search) {
-                // For ** pattern, process files in this directory with the remaining
-                // pattern
                 if (next_pattern[0]) {
                     cbuild_expand_wildcard_recursive(full_path, next_pattern, files,
                                                      file_count, capacity);
                 }
 
-                // Also search subdirectories with the original ** pattern
                 cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count,
                                                  capacity);
             } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {
-                // Handle directory/pattern format by traversing to subdirectory
-                const char *slash = strchr(pattern, '/');
+                const char* slash = strchr(pattern, '/');
                 if (!slash)
                     slash = strchr(pattern, '\\');
 
@@ -1287,7 +1642,6 @@ static int cbuild_expand_wildcard_recursive(const char *dir_path,
             }
         } else if (!recursive_search &&
                    cbuild_match_wildcard(pattern, entry->d_name)) {
-            // Check if this entry matches the pattern (for files)
             if (cbuild_add_to_file_list(files, file_count, capacity, full_path) !=
                 0) {
                 closedir(dir);
@@ -1297,14 +1651,14 @@ static int cbuild_expand_wildcard_recursive(const char *dir_path,
     }
 
     closedir(dir);
+#endif
     return 0;
 }
 
-// Helper: join two paths with a slash
-static char *cbuild__join_path(const char *a, const char *b) {
+static char* cbuild__join_path(const char* a, const char* b) {
     size_t la = strlen(a), lb = strlen(b);
     int need_slash = (la > 0 && a[la - 1] != '/' && a[la - 1] != '\\');
-    char *out = (char *)malloc(la + lb + 2);
+    char* out = (char*)malloc(la + lb + 2);
     strcpy(out, a);
     if (need_slash)
         strcat(out, "/");
@@ -1312,9 +1666,8 @@ static char *cbuild__join_path(const char *a, const char *b) {
     return out;
 }
 
-// Helper: trim whitespace
-static void cbuild__trim(char *s) {
-    char *end;
+static void cbuild__trim(char* s) {
+    char* end;
     while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
         s++;
     end = s + strlen(s) - 1;
@@ -1323,37 +1676,44 @@ static void cbuild__trim(char *s) {
         *end-- = 0;
 }
 
-// Helper: parse manifest by calling subproject's cbuild with --manifest flag
-static void cbuild__parse_manifest(subproject_t *sub) {
+static void cbuild__parse_manifest(cbuild_context_t* ctx, subproject_t* sub) {
     if (sub->manifest_loaded)
         return;
 
-    // Construct the command to run the subproject's cbuild with --manifest
-    char *cmd = NULL;
-#ifdef _WIN32
-    append_format(&cmd, "cd /d \"%s\" && \"%s\" --manifest", sub->directory,
-                  sub->cbuild_exe);
-#else
-    append_format(&cmd, "cd '%s' && '%s' --manifest", sub->directory,
-                  sub->cbuild_exe);
-#endif
+    /* Save current directory and change to subproject directory */
+    char old_cwd[PATH_MAX];
+    if (!getcwd(old_cwd, sizeof(old_cwd))) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Failed to get current directory");
+        return;
+    }
 
-    // Execute the command and capture its output
-    char *output = NULL;
-    int result = run_command(cmd, 1, &output);
-    free(cmd);
+    if (chdir(sub->directory) != 0) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Failed to change to subproject directory '%s'", sub->directory);
+        return;
+    }
+
+    /* Build argv for manifest command */
+    cbuild_argv_t argv;
+    cbuild_argv_init(&argv);
+    cbuild_argv_append(&argv, sub->cbuild_exe);
+    cbuild_argv_append(&argv, "--manifest");
+
+    char* output = NULL;
+    int result = cbuild_spawn_process(ctx, &argv, 1, &output);
+    cbuild_argv_free(&argv);
+
+    /* Restore original directory */
+    chdir(old_cwd);
 
     if (result != 0 || !output) {
-        fprintf(stderr, "cbuild: Failed to get manifest from subproject '%s'\n",
-                sub->alias);
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Failed to get manifest from subproject '%s'", sub->alias);
         if (output)
             free(output);
         return;
     }
 
-    // Parse the output line by line
-    char *saveptr = NULL;
-    char *line = strtok_r(output, "\r\n", &saveptr);
+    char* saveptr = NULL;
+    char* line = strtok_r(output, "\r\n", &saveptr);
 
     while (line) {
         cbuild__trim(line);
@@ -1362,15 +1722,13 @@ static void cbuild__parse_manifest(subproject_t *sub) {
             continue;
         }
 
-        // Format: TYPE NAME PATH
-        char *line_copy = strdup(line);
-        char *type = strtok(line_copy, " \t");
-        char *name = strtok(NULL, " \t");
-        char *path = strtok(NULL, "\r\n");
+        char* line_copy = strdup(line);
+        char* type = strtok(line_copy, " \t");
+        char* name = strtok(NULL, " \t");
+        char* path = strtok(NULL, "\r\n");
 
         if (type && name && path) {
             cbuild__trim(path);
-            // Add to sub->targets
             if (sub->target_count + 1 > sub->target_cap) {
                 sub->target_cap = sub->target_cap ? sub->target_cap * 2 : 4;
                 sub->targets = realloc(
@@ -1391,10 +1749,9 @@ static void cbuild__parse_manifest(subproject_t *sub) {
     sub->manifest_loaded = 1;
 }
 
-// Helper: find target in manifest
-static cbuild_subproject_target_t *
-cbuild__find_subproject_target(subproject_t *sub, const char *tgt_name) {
-    cbuild__parse_manifest(sub);
+static cbuild_subproject_target_t*
+cbuild__find_subproject_target(subproject_t* sub, const char* tgt_name) {
+    cbuild__parse_manifest(NULL, sub);
     for (int i = 0; i < sub->target_count; ++i) {
         if (strcmp(sub->targets[i].name, tgt_name) == 0) {
             return &sub->targets[i];
@@ -1403,39 +1760,22 @@ cbuild__find_subproject_target(subproject_t *sub, const char *tgt_name) {
     return NULL;
 }
 
-/* ensure_capacity_charpp: ensure char** array has room for one more element
- * (expand if needed) */
-static void ensure_capacity_charpp(char ***arr, int *count, int *capacity) {
+static int ensure_capacity_charpp(cbuild_context_t* ctx, char*** arr, int* count, int* capacity) {
     if (*count + 1 > *capacity) {
         int newcap = *capacity ? *capacity * 2 : 4;
-        char **newarr = (char **)realloc(*arr, newcap * sizeof(char *));
+        char** newarr = (char**)realloc(*arr, newcap * sizeof(char*));
         if (!newarr) {
-            fprintf(stderr, "cbuild: Out of memory\n");
-            exit(1);
+            cbuild__set_error(ctx, "Out of memory allocating %d pointers", newcap);
+            cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Out of memory");
+            return -1;
         }
         *arr = newarr;
         *capacity = newcap;
     }
+    return 0;
 }
 
-/* append_str: append a copy of string src onto dynamic string *dst
- * (reallocating *dst) */
-static void append_str(char **dst, const char *src) {
-    if (!src)
-        return;
-    size_t src_len = strlen(src);
-    size_t old_len = *dst ? strlen(*dst) : 0;
-    *dst = (char *)realloc(*dst, old_len + src_len + 1);
-    if (!*dst) {
-        fprintf(stderr, "cbuild: Out of memory\n");
-        exit(1);
-    }
-    strcpy(*dst + old_len, src);
-}
-
-/* append_format: append formatted text to a dynamic string (like a simple
- * asprintf accumulation) */
-static void append_format(char **dst, const char *fmt, ...) {
+static int append_format(char** dst, const char* fmt, ...) {
     va_list args;
     va_list args_copy;
     va_start(args, fmt);
@@ -1444,37 +1784,86 @@ static void append_format(char **dst, const char *fmt, ...) {
     va_end(args_copy);
     if (add_len < 0) {
         va_end(args);
-        return;
+        return -1;
     }
     size_t old_len = *dst ? strlen(*dst) : 0;
-    *dst = (char *)realloc(*dst, old_len + add_len + 1);
-    if (!*dst) {
-        fprintf(stderr, "cbuild: Out of memory\n");
-        exit(1);
+    char* newptr = (char*)realloc(*dst, old_len + add_len + 1);
+    if (!newptr) {
+        va_end(args);
+        return -1;
     }
+    *dst = newptr;
     vsnprintf(*dst + old_len, add_len + 1, fmt, args);
     va_end(args);
+    return 0;
 }
 
-/* ensure_dir_exists: create a directory (and parent directories) if not
-   present. Returns 0 on success, -1 on failure. */
-static int ensure_dir_exists(const char *path) {
+// --- small helpers for file suffix checks ------------------------------------
+static int cbuild__has_suffix(const char* s, const char* suf) {
+    if (!s || !suf) return 0;
+    size_t ls = strlen(s), lt = strlen(suf);
+    if (lt > ls) return 0;
+    return strcasecmp(s + (ls - lt), suf) == 0;
+}
+
+static int cbuild__is_library_path(const char* path) {
+    if (!path) return 0;
+#ifdef _WIN32
+    // linkable libs on Windows are .lib (and MinGW can use .a)
+    if (cbuild__has_suffix(path, ".lib")) return 1;
+    if (cbuild__has_suffix(path, ".a")) return 1;
+    // .dll is NOT linkable directly
+    return 0;
+#else
+#if defined(__APPLE__)
+    if (cbuild__has_suffix(path, ".dylib")) return 1;
+#endif
+    if (cbuild__has_suffix(path, ".a")) return 1;
+    if (cbuild__has_suffix(path, ".so")) return 1;
+    return 0;
+#endif
+}
+
+static unsigned cbuild__hash_path(const char* s) {
+    unsigned h = 5381u;
+    int c;
+    while ((c = (unsigned char)*s++)) {
+        h = ((h << 5) + h) ^ (unsigned)c; /* h*33 ^ c */
+    }
+    return h;
+}
+
+static void get_dir_from_path(const char* path, char* out_dir, size_t out_size) {
+    if (!path || !out_dir || out_size == 0) return;
+    const char* last_slash = strrchr(path, '/');
+    const char* last_backslash = strrchr(path, '\\');
+    const char* separator = last_slash > last_backslash ? last_slash : last_backslash;
+
+    if (separator) {
+        size_t dir_len = separator - path;
+        if (dir_len >= out_size) dir_len = out_size - 1;
+        strncpy(out_dir, path, dir_len);
+        out_dir[dir_len] = '\0';
+    } else {
+        out_dir[0] = '.';
+        out_dir[1] = '\0';
+    }
+}
+
+static int ensure_dir_exists(const char* path) {
     if (!path || !*path)
         return 0;
-    // We will create intermediate dirs one by one.
     char temp[1024];
     size_t len = strlen(path);
     if (len >= sizeof(temp)) {
         return -1;  // path too long
     }
     strcpy(temp, path);
-    // Remove trailing slash or backslash if any
     if (temp[len - 1] == '/' || temp[len - 1] == '\\') {
         temp[len - 1] = '\0';
     }
-    for (char *p = temp + 1; *p; ++p) {
+    for (char* p = temp + 1; *p; ++p) {
         if (*p == '/' || *p == '\\') {
-            // Temporarily truncate at this subdir
             *p = '\0';
 #ifdef _WIN32
             if (_mkdir(temp) != 0) {
@@ -1489,10 +1878,9 @@ static int ensure_dir_exists(const char *path) {
                 return -1;
             }
 #endif
-            *p = '/';  // restore separator
+            *p = '/';
         }
     }
-    // Create final directory
 #ifdef _WIN32
     if (_mkdir(temp) != 0) {
         if (errno != EEXIST)
@@ -1506,18 +1894,408 @@ static int ensure_dir_exists(const char *path) {
     return 0;
 }
 
-/* run_command: Runs a shell command. If capture_out is true, captures stdout in
-   *captured_output (must be freed by caller). Returns process exit code (0 for
-   success). */
-static int run_command(const char *cmd, int capture_out,
-                       char **captured_output) {
-    if (capture_out) {
-        // Open pipe to capture output
+static void cbuild_argv_init(cbuild_argv_t* argv) {
+    argv->args = NULL;
+    argv->count = 0;
+    argv->capacity = 0;
+}
+
+static void cbuild_argv_free(cbuild_argv_t* argv) {
+    if (argv->args) {
+        for (int i = 0; i < argv->count; ++i) {
+            free(argv->args[i]);
+        }
+        free(argv->args);
+    }
+    argv->args = NULL;
+    argv->count = 0;
+    argv->capacity = 0;
+}
+
+static int cbuild_argv_append(cbuild_argv_t* argv, const char* arg) {
+    if (argv->count >= argv->capacity) {
+        int new_cap = argv->capacity == 0 ? 16 : argv->capacity * 2;
+        char** new_args = (char**)realloc(argv->args, (new_cap + 1) * sizeof(char*));
+        if (!new_args) {
+            return -1;
+        }
+        argv->args = new_args;
+        argv->capacity = new_cap;
+    }
+    argv->args[argv->count] = strdup(arg);
+    if (!argv->args[argv->count]) {
+        return -1;
+    }
+    argv->count++;
+    argv->args[argv->count] = NULL; /* NULL-terminate for execvp */
+    return 0;
+}
+
 #ifdef _WIN32
-        // Use _popen on Windows
-        FILE *pipe = _popen(cmd, "r");
+/* Windows: Build command line from argv for CreateProcess */
+static char* cbuild_argv_to_cmdline(cbuild_argv_t* argv) {
+    size_t total_len = 0;
+    for (int i = 0; i < argv->count; ++i) {
+        const char* arg = argv->args[i];
+        int needs_quote = 0;
+        if (strchr(arg, ' ') || strchr(arg, '\t') || strchr(arg, '"') || *arg == '\0') {
+            needs_quote = 1;
+        }
+        if (needs_quote) total_len += 2; /* quotes */
+        for (const char* p = arg; *p; ++p) {
+            if (*p == '"')
+                total_len += 2; /* \" */
+            else if (*p == '\\') {
+                const char* q = p;
+                int num_backslash = 0;
+                while (*q == '\\') {
+                    q++;
+                    num_backslash++;
+                }
+                if (*q == '"' || *q == '\0') {
+                    total_len += num_backslash * 2;
+                    p = q - 1;
+                } else {
+                    total_len += num_backslash;
+                    p = q - 1;
+                }
+            } else {
+                total_len += 1;
+            }
+        }
+        if (i > 0) total_len += 1; /* space separator */
+    }
+
+    char* cmdline = (char*)malloc(total_len + 1);
+    if (!cmdline) return NULL;
+    char* out = cmdline;
+
+    for (int i = 0; i < argv->count; ++i) {
+        if (i > 0) *out++ = ' ';
+        const char* arg = argv->args[i];
+        int needs_quote = 0;
+        if (strchr(arg, ' ') || strchr(arg, '\t') || strchr(arg, '"') || *arg == '\0') {
+            needs_quote = 1;
+        }
+        if (needs_quote) *out++ = '"';
+
+        for (const char* p = arg; *p; ++p) {
+            if (*p == '"') {
+                *out++ = '\\';
+                *out++ = '"';
+            } else if (*p == '\\') {
+                const char* q = p;
+                int num_backslash = 0;
+                while (*q == '\\') {
+                    q++;
+                    num_backslash++;
+                }
+                if (*q == '"' || *q == '\0') {
+                    for (int k = 0; k < num_backslash * 2; ++k) *out++ = '\\';
+                    p = q - 1;
+                } else {
+                    for (int k = 0; k < num_backslash; ++k) *out++ = '\\';
+                    p = q - 1;
+                }
+            } else {
+                *out++ = *p;
+            }
+        }
+        if (needs_quote) *out++ = '"';
+    }
+    *out = '\0';
+    return cmdline;
+}
 #else
-        FILE *pipe = popen(cmd, "r");
+/* Unix/Linux: Build command line from argv for compile_commands.json */
+static char* cbuild_argv_to_cmdline(cbuild_argv_t* argv) {
+    size_t total_len = 0;
+    for (int i = 0; i < argv->count; ++i) {
+        const char* arg = argv->args[i];
+        int needs_quote = 0;
+        /* Check if argument needs quoting */
+        for (const char* p = arg; *p; ++p) {
+            if (*p == ' ' || *p == '\t' || *p == '\'' || *p == '"' || *p == '\\' ||
+                *p == '$' || *p == '`' || *p == '!' || *p == '*' || *p == '?' ||
+                *p == '[' || *p == ']' || *p == '(' || *p == ')' || *p == '{' || *p == '}' ||
+                *p == '&' || *p == '|' || *p == ';' || *p == '<' || *p == '>') {
+                needs_quote = 1;
+                break;
+            }
+        }
+        if (*arg == '\0') needs_quote = 1;
+
+        if (needs_quote) {
+            total_len += 2; /* quotes */
+            for (const char* p = arg; *p; ++p) {
+                if (*p == '\'' || *p == '\\' || *p == '"') {
+                    total_len += 2; /* escape char + char */
+                } else {
+                    total_len += 1;
+                }
+            }
+        } else {
+            total_len += strlen(arg);
+        }
+        if (i > 0) total_len += 1; /* space separator */
+    }
+
+    char* cmdline = (char*)malloc(total_len + 1);
+    if (!cmdline) return NULL;
+    char* out = cmdline;
+
+    for (int i = 0; i < argv->count; ++i) {
+        if (i > 0) *out++ = ' ';
+        const char* arg = argv->args[i];
+        int needs_quote = 0;
+
+        /* Check if argument needs quoting */
+        for (const char* p = arg; *p; ++p) {
+            if (*p == ' ' || *p == '\t' || *p == '\'' || *p == '"' || *p == '\\' ||
+                *p == '$' || *p == '`' || *p == '!' || *p == '*' || *p == '?' ||
+                *p == '[' || *p == ']' || *p == '(' || *p == ')' || *p == '{' || *p == '}' ||
+                *p == '&' || *p == '|' || *p == ';' || *p == '<' || *p == '>') {
+                needs_quote = 1;
+                break;
+            }
+        }
+        if (*arg == '\0') needs_quote = 1;
+
+        if (needs_quote) {
+            *out++ = '"';
+            for (const char* p = arg; *p; ++p) {
+                if (*p == '"' || *p == '\\' || *p == '$' || *p == '`') {
+                    *out++ = '\\';
+                }
+                *out++ = *p;
+            }
+            *out++ = '"';
+        } else {
+            for (const char* p = arg; *p; ++p) {
+                *out++ = *p;
+            }
+        }
+    }
+    *out = '\0';
+    return cmdline;
+}
+#endif
+
+static int cbuild_spawn_process(cbuild_context_t* ctx, cbuild_argv_t* argv, int capture_output, char** captured_output) {
+    if (ctx && ctx->verbose && !capture_output) {
+        char cmd_buf[4096];
+        int pos = 0;
+        for (int i = 0; i < argv->count && pos < (int)sizeof(cmd_buf) - 1; ++i) {
+            if (i > 0) cmd_buf[pos++] = ' ';
+            if (strchr(argv->args[i], ' ')) {
+                pos += snprintf(cmd_buf + pos, sizeof(cmd_buf) - pos, "'%s'", argv->args[i]);
+            } else {
+                pos += snprintf(cmd_buf + pos, sizeof(cmd_buf) - pos, "%s", argv->args[i]);
+            }
+        }
+        cmd_buf[pos] = '\0';
+        cbuild__log(ctx, CBUILD_LOG_VERBOSE, "%s", cmd_buf);
+    }
+
+#ifdef _WIN32
+    HANDLE hOutputRead = NULL, hOutputWrite = NULL;
+    SECURITY_ATTRIBUTES sa = { 0 };
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    if (capture_output) {
+        if (!CreatePipe(&hOutputRead, &hOutputWrite, &sa, 0)) {
+            return -1;
+        }
+        SetHandleInformation(hOutputRead, HANDLE_FLAG_INHERIT, 0);
+    }
+
+    STARTUPINFOA si = { 0 };
+    si.cb = sizeof(STARTUPINFOA);
+    if (capture_output) {
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = hOutputWrite;
+        si.hStdError = hOutputWrite;
+        si.dwFlags |= STARTF_USESTDHANDLES;
+    }
+
+    PROCESS_INFORMATION pi = { 0 };
+    char* cmdline = cbuild_argv_to_cmdline(argv);
+    if (!cmdline) {
+        if (capture_output) {
+            CloseHandle(hOutputRead);
+            CloseHandle(hOutputWrite);
+        }
+        return -1;
+    }
+
+    BOOL success = CreateProcessA(
+        NULL,
+        cmdline,
+        NULL,
+        NULL,
+        TRUE,
+        0,
+        NULL,
+        NULL,
+        &si,
+        &pi);
+
+    free(cmdline);
+
+    if (!success) {
+        if (capture_output) {
+            CloseHandle(hOutputRead);
+            CloseHandle(hOutputWrite);
+        }
+        return -1;
+    }
+
+    if (capture_output) {
+        CloseHandle(hOutputWrite);
+
+        *captured_output = NULL;
+        size_t out_len = 0;
+        char buffer[4096];
+        DWORD bytes_read;
+
+        while (ReadFile(hOutputRead, buffer, sizeof(buffer), &bytes_read, NULL) && bytes_read > 0) {
+            char* new_output = (char*)realloc(*captured_output, out_len + bytes_read + 1);
+            if (!new_output) {
+                free(*captured_output);
+                *captured_output = NULL;
+                CloseHandle(hOutputRead);
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                return -1;
+            }
+            *captured_output = new_output;
+            memcpy(*captured_output + out_len, buffer, bytes_read);
+            out_len += bytes_read;
+            (*captured_output)[out_len] = '\0';
+        }
+
+        CloseHandle(hOutputRead);
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return (int)exit_code;
+
+#else
+    /* POSIX: try posix_spawn first, fall back to fork/execvp */
+    int pipefd[2] = { -1, -1 };
+
+    if (capture_output) {
+        if (pipe(pipefd) != 0) {
+            return -1;
+        }
+    }
+
+    pid_t pid;
+
+#ifdef __APPLE__
+    /* macOS: use posix_spawn (preferred) */
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+
+    if (capture_output) {
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
+        posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+        posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    }
+
+    int spawn_result = posix_spawnp(&pid, argv->args[0], &actions, NULL, argv->args, environ);
+    posix_spawn_file_actions_destroy(&actions);
+
+    if (spawn_result != 0) {
+        if (capture_output) {
+            close(pipefd[0]);
+            close(pipefd[1]);
+        }
+        return -1;
+    }
+
+#else
+    /* Linux and other POSIX: use fork/execvp */
+    pid = fork();
+    if (pid < 0) {
+        if (capture_output) {
+            close(pipefd[0]);
+            close(pipefd[1]);
+        }
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        if (capture_output) {
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+            close(pipefd[0]);
+            close(pipefd[1]);
+        }
+        execvp(argv->args[0], argv->args);
+        _exit(127); /* execvp failed */
+    }
+#endif
+
+    /* Parent process */
+    if (capture_output) {
+        close(pipefd[1]);
+
+        *captured_output = NULL;
+        size_t out_len = 0;
+        char buffer[4096];
+        ssize_t bytes_read;
+
+        while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
+            char* new_output = (char*)realloc(*captured_output, out_len + bytes_read + 1);
+            if (!new_output) {
+                free(*captured_output);
+                *captured_output = NULL;
+                close(pipefd[0]);
+                waitpid(pid, NULL, 0);
+                return -1;
+            }
+            *captured_output = new_output;
+            memcpy(*captured_output + out_len, buffer, bytes_read);
+            out_len += bytes_read;
+            (*captured_output)[out_len] = '\0';
+        }
+
+        close(pipefd[0]);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return -1;
+#endif
+}
+
+/* Legacy shell-based command execution (deprecated, kept for compatibility) */
+static int run_command(cbuild_context_t* ctx, const char* cmd, int capture_out,
+                       char** captured_output) {
+    if (ctx && ctx->verbose && !capture_out) {
+        cbuild__log(ctx, CBUILD_LOG_VERBOSE, "%s", cmd);
+    }
+    if (capture_out) {
+#ifdef _WIN32
+        FILE* pipe = _popen(cmd, "r");
+#else
+        FILE* pipe = popen(cmd, "r");
 #endif
         if (!pipe) {
             return -1;
@@ -1527,9 +2305,9 @@ static int run_command(const char *cmd, int capture_out,
         *captured_output = NULL;
         while (fgets(buffer, sizeof(buffer), pipe)) {
             size_t chunk = strlen(buffer);
-            *captured_output = (char *)realloc(*captured_output, out_len + chunk + 1);
+            *captured_output = (char*)realloc(*captured_output, out_len + chunk + 1);
             if (!*captured_output) {
-                fprintf(stderr, "cbuild: Out of memory capturing command output\n");
+                cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Out of memory capturing command output");
 #ifdef _WIN32
                 _pclose(pipe);
 #else
@@ -1546,102 +2324,422 @@ static int run_command(const char *cmd, int capture_out,
 #else
         int exitCode = pclose(pipe);
 #endif
-        // Normalize exit code (on Windows, _pclose returns -1 if error launching)
         if (exitCode == -1) {
             return -1;
         }
-        // On Windows, exitCode is the result of cmd << 8 (conventional), so 0 means
-        // success. We'll just return as is, since for our usage 0 indicates
-        // success.
         return exitCode;
     } else {
-        // Not capturing output: use system() to execute (prints output directly).
-        int ret = system(cmd);
-        // system returns encoded status; we assume 0 means success on both Windows
-        // and Unix.
+#ifdef _WIN32
+        /* Use PowerShell on Windows for better path and command handling */
+        size_t cmd_len = strlen(cmd);
+        char* ps_cmd = (char*)malloc(cmd_len + 128);
+        if (!ps_cmd) return -1;
+        snprintf(ps_cmd, cmd_len + 128, "powershell -NoProfile -ExecutionPolicy Bypass -Command \"%s\"", cmd);
+        int ret = system(ps_cmd);
+        free(ps_cmd);
         return ret;
+#else
+        int ret = system(cmd);
+        return ret;
+#endif
     }
 }
 
-/* need_recompile: Checks timestamps of source, object, and included headers to
-   decide if recompilation is needed. Returns 1 if the source (or its headers)
-   is newer than object (or object missing), otherwise 0. */
-static int need_recompile(const char *src_file, const char *obj_file,
-                          const char *dep_file) {
+/* Helper to resolve compiler for a target */
+static const char* cbuild_target_compiler(cbuild_context_t* ctx, target_t* t) {
+    return t->compiler ? t->compiler : ctx->cc;
+}
+
+static cbuild_cc_kind_t cbuild_target_cc_kind(cbuild_context_t* ctx, target_t* t) {
+    return (t->cc_kind_override != -1) ? (cbuild_cc_kind_t)t->cc_kind_override : ctx->cc_kind;
+}
+
+static const char* cbuild_target_linker(cbuild_context_t* ctx, target_t* t) {
+    return t->linker ? t->linker : ctx->ld;
+}
+
+static int need_recompile(cbuild_context_t* ctx, const char* src_file, const char* obj_file,
+                          const char* dep_file, target_t* t) {
+    /* First: compute and compare a signature of the would-be compile command */
+    char* sig = NULL;
+    const char* cc = cbuild_target_compiler(ctx, t);
+    cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
+    {
+        cbuild_argv_t argv;
+        cbuild_argv_init(&argv);
+
+        /* Rebuild the same argv used by compile_source() */
+        /* Use append_flags to handle compilers with spaces (e.g., "zig cc -target ...") */
+        cbuild_argv_append_flags(&argv, cc);
+
+        if (cc_kind == CBUILD_CC_MSVC) {
+            cbuild_argv_append(&argv, "/c");
+            cbuild_argv_append(&argv, "/nologo");
+            char fo_arg[1024];
+            snprintf(fo_arg, sizeof(fo_arg), "/Fo%s", obj_file);
+            cbuild_argv_append(&argv, fo_arg);
+            cbuild_argv_append(&argv, "/showIncludes");
+        } else {
+            cbuild_argv_append(&argv, "-c");
+            cbuild_argv_append(&argv, "-o");
+            cbuild_argv_append(&argv, obj_file);
+            if (dep_file) {
+                cbuild_argv_append(&argv, "-MMD");
+                cbuild_argv_append(&argv, "-MF");
+                cbuild_argv_append(&argv, dep_file);
+            }
+        }
+
+        for (int i = 0; i < ctx->global_cflag_count; ++i) {
+            cbuild_argv_append(&argv, ctx->global_cflags[i]);
+        }
+        for (int i = 0; i < t->cflag_count; ++i) {
+            cbuild_argv_append(&argv, t->cflags[i]);
+        }
+
+        for (int i = 0; i < t->include_count; ++i) {
+            char inc_arg[1024];
+            if (cc_kind == CBUILD_CC_MSVC) {
+                snprintf(inc_arg, sizeof(inc_arg), "/I%s", t->include_dirs[i]);
+            } else {
+                snprintf(inc_arg, sizeof(inc_arg), "-I%s", t->include_dirs[i]);
+            }
+            cbuild_argv_append(&argv, inc_arg);
+        }
+
+        for (int i = 0; i < ctx->global_def_count; ++i) {
+            char def_arg[512];
+            if (cc_kind == CBUILD_CC_MSVC) {
+                snprintf(def_arg, sizeof(def_arg), "/D%s", ctx->global_defines[i]);
+            } else {
+                snprintf(def_arg, sizeof(def_arg), "-D%s", ctx->global_defines[i]);
+            }
+            cbuild_argv_append(&argv, def_arg);
+        }
+
+        for (int i = 0; i < t->define_count; ++i) {
+            char def_arg[512];
+            if (cc_kind == CBUILD_CC_MSVC) {
+                snprintf(def_arg, sizeof(def_arg), "/D%s", t->defines[i]);
+            } else {
+                snprintf(def_arg, sizeof(def_arg), "-D%s", t->defines[i]);
+            }
+            cbuild_argv_append(&argv, def_arg);
+        }
+
+        cbuild_argv_append(&argv, src_file);
+
+        for (int i = 0; i < argv.count; ++i) {
+            append_format(&sig, "%s\n", argv.args[i]);
+        }
+        const char* ev;
+        ev = getenv("CFLAGS");
+        if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
+        ev = getenv("CPPFLAGS");
+        if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
+        cbuild_argv_free(&argv);
+    }
+
+    char sigpath[1024];
+    snprintf(sigpath, sizeof(sigpath), "%s.sig", obj_file);
+    int sig_mismatch = 0;
+    {
+        FILE* f = fopen(sigpath, "rb");
+        if (!f) {
+            sig_mismatch = 1;
+#ifdef CBUILD_DEBUG_SIGNATURE
+            fprintf(stderr, "DEBUG: Signature file missing for %s (%s)\n", src_file, sigpath);
+#endif
+        } else {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            char* prev = (char*)malloc((size_t)sz + 1);
+            if (!prev) {
+                sig_mismatch = 1;
+            } else {
+                size_t rd = fread(prev, 1, (size_t)sz, f);
+                prev[rd] = '\0';
+                if (strcmp(prev, sig) != 0) {
+                    sig_mismatch = 1;
+#ifdef CBUILD_DEBUG_SIGNATURE
+                    fprintf(stderr, "DEBUG: Signature mismatch for %s\n", src_file);
+                    fprintf(stderr, "--- PREV (from file, %ld bytes) ---\n%s\n", sz, prev);
+                    fprintf(stderr, "--- NEW (computed, %zu bytes) ---\n%s\n", strlen(sig), sig);
+                    fprintf(stderr, "--- END ---\n");
+#endif
+                }
+                free(prev);
+            }
+            fclose(f);
+        }
+    }
+    if (sig) free(sig);
+    if (sig_mismatch) {
+        return 1;
+    }
+
+    /* Fallback: timestamp checks on src/object and header dependencies */
     struct stat st_src, st_obj;
     if (stat(src_file, &st_src) != 0) {
+#ifdef CBUILD_DEBUG_SIGNATURE
+        fprintf(stderr, "DEBUG: stat() failed for source file: %s\n", src_file);
+#endif
         return 1;
     }
     if (stat(obj_file, &st_obj) != 0) {
+#ifdef CBUILD_DEBUG_SIGNATURE
+        fprintf(stderr, "DEBUG: stat() failed for object file: %s\n", obj_file);
+#endif
         return 1;
     }
     if (st_src.st_mtime > st_obj.st_mtime) {
+#ifdef CBUILD_DEBUG_SIGNATURE
+        fprintf(stderr, "DEBUG: Source newer than object: %s (src=%lld, obj=%lld)\n",
+                src_file, (long long)st_src.st_mtime, (long long)st_obj.st_mtime);
+#endif
         return 1;
     }
+
+    /* Check header dependencies from .d file */
+    if (dep_file) {
+        FILE* df = fopen(dep_file, "r");
+        if (df) {
+            /* Read the entire .d file */
+            fseek(df, 0, SEEK_END);
+            long fsize = ftell(df);
+            fseek(df, 0, SEEK_SET);
+
+            char* content = (char*)malloc(fsize + 1);
+            if (content) {
+                size_t read_size = fread(content, 1, fsize, df);
+                content[read_size] = '\0';
+                fclose(df);
+
+                /* First, normalize line continuations: replace " \\n" or " \\\r\n" with space */
+                char* out = content;
+                char* in = content;
+                while (*in) {
+                    /* Check for line continuation: backslash followed by newline */
+                    if (in[0] == '\\' && (in[1] == '\n' || (in[1] == '\r' && in[2] == '\n'))) {
+                        /* Skip the backslash and newline, replace with space */
+                        *out++ = ' ';
+                        in += (in[1] == '\r') ? 3 : 2;
+                    } else {
+                        *out++ = *in++;
+                    }
+                }
+                *out = '\0';
+
+                /* Parse dependencies - format is: target: dep1 dep2 dep3 ... */
+                /* On Windows, skip drive letter colon (e.g., C:) */
+                char* p = content;
+#ifdef _WIN32
+                /* Skip drive letter if present (e.g., "C:\...") */
+                if (p[0] && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) {
+                    p += 2;
+                }
+#endif
+                p = strchr(p, ':');
+                if (p) {
+                    p++; /* Skip the ':' */
+
+                    /* Parse each dependency - now we can safely split on whitespace only */
+                    char* saveptr = NULL;
+                    char* token = strtok_r(p, " \t\n\r", &saveptr);
+                    while (token) {
+                        /* Skip empty tokens */
+                        if (strlen(token) > 0) {
+                            struct stat st_dep;
+                            if (stat(token, &st_dep) == 0) {
+                                /* If any dependency is newer than object file, recompile */
+                                if (st_dep.st_mtime > st_obj.st_mtime) {
+#ifdef CBUILD_DEBUG_SIGNATURE
+                                    fprintf(stderr, "DEBUG: Header dep newer than object for %s: %s (dep=%lld, obj=%lld)\n",
+                                            src_file, token, (long long)st_dep.st_mtime, (long long)st_obj.st_mtime);
+#endif
+                                    free(content);
+                                    return 1;
+                                }
+                            } else {
+                                /* Dependency file doesn't exist, need to recompile */
+#ifdef CBUILD_DEBUG_SIGNATURE
+                                fprintf(stderr, "DEBUG: Header dep stat() failed for %s: %s\n", src_file, token);
+#endif
+                                free(content);
+                                return 1;
+                            }
+                        }
+                        token = strtok_r(NULL, " \t\n\r", &saveptr);
+                    }
+                }
+                free(content);
+            } else {
+                fclose(df);
+            }
+        }
+    }
+
     return 0;
 }
 
-/* compile_source: Compile a single source file to object file (and produce dep
-   file). Returns 0 on success, non-zero on failure. */
-static int compile_source(const char *src_file, const char *obj_file,
-                          const char *dep_file, target_t *t) {
-    ensure_dir_exists(t->obj_dir);
-    char *cmd = NULL;
-    append_format(&cmd, "\"%s\" ", g_cc);
-#ifdef _WIN32
-    append_format(&cmd, "/c /nologo /Fo\"%s\" ", obj_file);
-    append_str(&cmd, "/showIncludes ");
-#else
-    append_format(&cmd, "-c -o \"%s\" ", obj_file);
-#endif
-    if (t->cflags && strlen(t->cflags) > 0) {
-        append_format(&cmd, "%s ", t->cflags);
-    } else if (g_global_cflags) {
-        append_format(&cmd, "%s ", g_global_cflags);
-    }
-    for (int i = 0; i < t->include_count; ++i) {
-        const char *inc = t->include_dirs[i];
-#ifdef _WIN32
-        append_format(&cmd, "/I \"%s\" ", inc);
-#else
-        append_format(&cmd, "-I\"%s\" ", inc);
-#endif
+/* Helper to split space-separated flag strings into argv tokens */
+/* Note: No caching - called from parallel worker threads, must be thread-safe */
+static void cbuild_argv_append_flags(cbuild_argv_t* argv, const char* flags) {
+    if (!flags || !*flags) return;
+
+    /* Tokenize the flags string */
+    char* copy = strdup(flags);
+    if (!copy) return;
+
+    char* p = copy;
+    while (*p) {
+        /* Skip leading whitespace */
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+
+        /* Find end of token */
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            } else {
+                p++;
+            }
+        }
+
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            /* Remove surrounding quotes if present */
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            cbuild_argv_append(argv, token);
+
+            *p = saved;
+        }
     }
 
-    /* --- NEW: global + per‑target defines -------------------------------- */
-    for (int i = 0; i < g_global_def_count; ++i) {
-#ifdef _WIN32
-        append_format(&cmd, "/D%s ", g_global_defines[i]);
-#else
-        append_format(&cmd, "-D%s ", g_global_defines[i]);
-#endif
+    free(copy);
+}
+
+static int compile_source(cbuild_context_t* ctx, const char* src_file, const char* obj_file,
+                          const char* dep_file, target_t* t) {
+    ensure_dir_exists(t->obj_dir);
+
+    const char* cc = cbuild_target_compiler(ctx, t);
+    cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
+
+    /* Build argv for compilation */
+    cbuild_argv_t argv;
+    cbuild_argv_init(&argv);
+
+    /* Use append_flags to handle compilers with spaces (e.g., "zig cc -target ...") */
+    cbuild_argv_append_flags(&argv, cc);
+
+    if (cc_kind == CBUILD_CC_MSVC) {
+        cbuild_argv_append(&argv, "/c");
+        cbuild_argv_append(&argv, "/nologo");
+        char fo_arg[1024];
+        snprintf(fo_arg, sizeof(fo_arg), "/Fo%s", obj_file);
+        cbuild_argv_append(&argv, fo_arg);
+        cbuild_argv_append(&argv, "/showIncludes");
+    } else {
+        cbuild_argv_append(&argv, "-c");
+        cbuild_argv_append(&argv, "-o");
+        cbuild_argv_append(&argv, obj_file);
+        /* Add dependency generation flags for GCC/Clang */
+        if (dep_file) {
+            cbuild_argv_append(&argv, "-MMD");
+            cbuild_argv_append(&argv, "-MF");
+            cbuild_argv_append(&argv, dep_file);
+        }
+    }
+
+    for (int i = 0; i < ctx->global_cflag_count; ++i) {
+        cbuild_argv_append(&argv, ctx->global_cflags[i]);
+    }
+    for (int i = 0; i < t->cflag_count; ++i) {
+        cbuild_argv_append(&argv, t->cflags[i]);
+    }
+
+    for (int i = 0; i < t->include_count; ++i) {
+        char inc_arg[1024];
+        if (cc_kind == CBUILD_CC_MSVC) {
+            snprintf(inc_arg, sizeof(inc_arg), "/I%s", t->include_dirs[i]);
+        } else {
+            snprintf(inc_arg, sizeof(inc_arg), "-I%s", t->include_dirs[i]);
+        }
+        cbuild_argv_append(&argv, inc_arg);
+    }
+
+    for (int i = 0; i < ctx->global_def_count; ++i) {
+        char def_arg[512];
+        if (cc_kind == CBUILD_CC_MSVC) {
+            snprintf(def_arg, sizeof(def_arg), "/D%s", ctx->global_defines[i]);
+        } else {
+            snprintf(def_arg, sizeof(def_arg), "-D%s", ctx->global_defines[i]);
+        }
+        cbuild_argv_append(&argv, def_arg);
     }
 
     for (int i = 0; i < t->define_count; ++i) {
-#ifdef _WIN32
-        append_format(&cmd, "/D%s ", t->defines[i]);
-#else
-        append_format(&cmd, "-D%s ", t->defines[i]);
-#endif
+        char def_arg[512];
+        if (cc_kind == CBUILD_CC_MSVC) {
+            snprintf(def_arg, sizeof(def_arg), "/D%s", t->defines[i]);
+        } else {
+            snprintf(def_arg, sizeof(def_arg), "-D%s", t->defines[i]);
+        }
+        cbuild_argv_append(&argv, def_arg);
     }
 
-    append_format(&cmd, "\"%s\"", src_file);
+    cbuild_argv_append(&argv, src_file);
+
+    // Print command in verbose mode before executing
+    if (ctx->verbose) {
+        char cmd_buf[4096];
+        int pos = 0;
+        for (int i = 0; i < argv.count && pos < (int)sizeof(cmd_buf) - 1; ++i) {
+            if (i > 0) cmd_buf[pos++] = ' ';
+            if (strchr(argv.args[i], ' ')) {
+                pos += snprintf(cmd_buf + pos, sizeof(cmd_buf) - pos, "'%s'", argv.args[i]);
+            } else {
+                pos += snprintf(cmd_buf + pos, sizeof(cmd_buf) - pos, "%s", argv.args[i]);
+            }
+        }
+        cmd_buf[pos] = '\0';
+        cbuild__log(ctx, CBUILD_LOG_VERBOSE, "%s", cmd_buf);
+    }
 
     int result;
-    char *output = NULL;
+    char* output = NULL;
+    result = cbuild_spawn_process(ctx, &argv, 1, &output);
+
 #ifdef _WIN32
-    result = run_command(cmd, 1, &output);
     if (output) {
-        FILE *df = fopen(dep_file, "w");
+        FILE* df = fopen(dep_file, "w");
         if (df) {
             fprintf(df, "%s: %s", obj_file, src_file);
-            char *saveptr = NULL;
-            char *line = strtok_r(output, "\r\n", &saveptr);
+            char* saveptr = NULL;
+            char* line = strtok_r(output, "\r\n", &saveptr);
+            /* Allow override of the include tag for non-English locales */
+            const char* include_tag = getenv("CBUILD_MSVC_INCLUDE_TAG");
+            if (!include_tag) include_tag = "Note: including file:";
             while (line) {
-                const char *tag = "Note: including file:";
-                char *pos = strstr(line, tag);
+                char* pos = strstr(line, include_tag);
                 if (pos) {
-                    pos += strlen(tag);
+                    pos += strlen(include_tag);
                     while (*pos == ' ' || *pos == '\t')
                         pos++;
                     if (*pos) {
@@ -1659,189 +2757,801 @@ static int compile_source(const char *src_file, const char *obj_file,
         free(output);
     }
 #else
-    result = run_command(cmd, 1, &output);
     if (output && result != 0) {
         fwrite(output, 1, strlen(output), stderr);
     }
     if (output)
         free(output);
 #endif
-    free(cmd);
+
+    /* Write compile signature for change detection (only on success) */
+    if (result == 0) {
+        char* sig = NULL;
+        for (int i = 0; i < argv.count; ++i) {
+            append_format(&sig, "%s\n", argv.args[i]);
+        }
+        const char* ev;
+        ev = getenv("CFLAGS");
+        if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
+        ev = getenv("CPPFLAGS");
+        if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
+        char sigpath[1024];
+        snprintf(sigpath, sizeof(sigpath), "%s.sig", obj_file);
+        FILE* sf = fopen(sigpath, "wb");
+        if (sf) {
+            fwrite(sig, 1, strlen(sig), sf);
+            fclose(sf);
+        }
+        if (sig) free(sig);
+    }
+
+    cbuild_argv_free(&argv);
+
     if (result != 0) {
-        fprintf(stderr, "cbuild: Compilation failed for %s\n", src_file);
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Compilation failed for %s", src_file);
     }
     return result;
 }
 
-/* Collect compile commands for all sources of a target (for compile_commands.json) */
-static void collect_compile_commands_for_target(target_t *t) {
-    if (!g_generate_compile_commands)
-        return;
-    for (int i = 0; i < t->sources_count; ++i) {
-        const char *src_file = t->sources[i];
-        const char *slash = strrchr(src_file, '/');
-        const char *base = slash ? slash + 1 : src_file;
-        char *dot = strrchr(base, '.');
+static void enqueue_compile_job(cbuild_context_t* ctx, target_t* target, int source_index) {
+    if (ctx->job_count >= ctx->job_capacity) {
+        ctx->job_capacity = ctx->job_capacity ? ctx->job_capacity * 2 : 32;
+        ctx->job_queue = realloc(ctx->job_queue, ctx->job_capacity * sizeof(compile_job_t));
+    }
+
+    ctx->job_queue[ctx->job_count].target = target;
+    ctx->job_queue[ctx->job_count].source_index = source_index;
+    ctx->job_count++;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI compile_worker(void* arg) {
+    compile_worker_arg_t* warg = (compile_worker_arg_t*)arg;
+    cbuild_context_t* ctx = warg->ctx;
+    while (1) {
+        WaitForSingleObject(ctx->job_semaphore, INFINITE);
+
+        EnterCriticalSection(&ctx->queue_mutex);
+        if (ctx->jobs_completed >= ctx->job_count || ctx->build_error) {
+            LeaveCriticalSection(&ctx->queue_mutex);
+            break;
+        }
+
+        int job_index = ctx->jobs_completed++;
+        compile_job_t job = ctx->job_queue[job_index];
+        LeaveCriticalSection(&ctx->queue_mutex);
+
+        target_t* t = job.target;
+        int i = job.source_index;
+        const char* src = t->sources[i];
+        const char* slash = strrchr(src, '/');
+        const char* bslash = strrchr(src, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        const char* base = slash ? slash + 1 : src;
+        char* dot = strrchr(base, '.');
         size_t len = dot ? (size_t)(dot - base) : strlen(base);
+        unsigned h = cbuild__hash_path(src);
         char objname[512];
-        snprintf(objname, sizeof(objname), "%s/%.*s.o", t->obj_dir, (int)len, base);
+        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
 
-        char *cmd = NULL;
-        append_format(&cmd, "\"%s\" ", g_cc);
-    #ifdef _WIN32
-        append_format(&cmd, "/c /nologo /Fo\"%s\" ", objname);
-        append_str(&cmd, "/showIncludes ");
-    #else
-        append_format(&cmd, "-c -o \"%s\" ", objname);
-    #endif
-        if (t->cflags && strlen(t->cflags) > 0) {
-            append_format(&cmd, "%s ", t->cflags);
-        } else if (g_global_cflags) {
-            append_format(&cmd, "%s ", g_global_cflags);
-        }
-        for (int j = 0; j < t->include_count; ++j) {
-            const char *inc = t->include_dirs[j];
-        #ifdef _WIN32
-            append_format(&cmd, "/I \"%s\" ", inc);
-        #else
-            append_format(&cmd, "-I\"%s\" ", inc);
-        #endif
-        }
-        for (int j = 0; j < g_global_def_count; ++j) {
-        #ifdef _WIN32
-            append_format(&cmd, "/D%s ", g_global_defines[j]);
-        #else
-            append_format(&cmd, "-D%s ", g_global_defines[j]);
-        #endif
-        }
-        for (int j = 0; j < t->define_count; ++j) {
-        #ifdef _WIN32
-            append_format(&cmd, "/D%s ", t->defines[j]);
-        #else
-            append_format(&cmd, "-D%s ", t->defines[j]);
-        #endif
-        }
-        append_format(&cmd, "\"%s\"", src_file);
+        char depname[512];
+        snprintf(depname, sizeof(depname), "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
 
-        char cwd[PATH_MAX];
-        if (getcwd(cwd, sizeof(cwd))) {
-            if (g_cc_count + 1 > g_cc_cap) {
-                g_cc_cap = g_cc_cap ? g_cc_cap * 2 : 4;
-                g_cc_entries = realloc(g_cc_entries, g_cc_cap * sizeof(*g_cc_entries));
+        if (need_recompile(ctx, src, objname, depname, t)) {
+            cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "%s", src);
+            if (compile_source(ctx, src, objname, depname, t) != 0) {
+                EnterCriticalSection(&ctx->queue_mutex);
+                ctx->build_error = 1;
+                LeaveCriticalSection(&ctx->queue_mutex);
+                break;
             }
-            g_cc_entries[g_cc_count].directory = strdup(cwd);
-            g_cc_entries[g_cc_count].command = strdup(cmd);
-            g_cc_entries[g_cc_count].file = strdup(src_file);
-            g_cc_count++;
         }
-        free(cmd);
+    }
+    return 0;
+}
+#else
+static void* compile_worker(void* arg) {
+    compile_worker_arg_t* warg = (compile_worker_arg_t*)arg;
+    cbuild_context_t* ctx = warg->ctx;
+    while (1) {
+        sem_wait(&ctx->job_semaphore);
+
+        pthread_mutex_lock(&ctx->queue_mutex);
+        if (ctx->jobs_completed >= ctx->job_count || ctx->build_error) {
+            pthread_mutex_unlock(&ctx->queue_mutex);
+            break;
+        }
+
+        int job_index = ctx->jobs_completed++;
+        compile_job_t job = ctx->job_queue[job_index];
+        pthread_mutex_unlock(&ctx->queue_mutex);
+
+        target_t* t = job.target;
+        int i = job.source_index;
+        const char* src = t->sources[i];
+        const char* slash = strrchr(src, '/');
+        const char* bslash = strrchr(src, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        const char* base = slash ? slash + 1 : src;
+        char* dot = strrchr(base, '.');
+        size_t len = dot ? (size_t)(dot - base) : strlen(base);
+        unsigned h = cbuild__hash_path(src);
+        char objname[512];
+        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
+
+        char depname[512];
+        snprintf(depname, sizeof(depname), "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+
+        if (need_recompile(ctx, src, objname, depname, t)) {
+            cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "%s", src);
+            if (compile_source(ctx, src, objname, depname, t) != 0) {
+                pthread_mutex_lock(&ctx->queue_mutex);
+                ctx->build_error = 1;
+                pthread_mutex_unlock(&ctx->queue_mutex);
+                break;
+            }
+        }
+    }
+    return NULL;
+}
+#endif
+
+static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* target, int* error_flag) {
+    ctx->job_count = 0;
+    ctx->jobs_completed = 0;
+    ctx->build_error = 0;
+
+    for (int i = 0; i < target->sources_count; ++i) {
+        enqueue_compile_job(ctx, target, i);
+    }
+
+    if (ctx->job_count == 0) return;
+
+    compile_worker_arg_t warg;
+    warg.ctx = ctx;
+
+    int thread_count = ctx->parallel_jobs < ctx->job_count ? ctx->parallel_jobs : ctx->job_count;
+
+#ifdef _WIN32
+    InitializeCriticalSection(&ctx->queue_mutex);
+    ctx->job_semaphore = CreateSemaphore(NULL, 0, ctx->job_count + thread_count, NULL);
+#else
+    pthread_mutex_init(&ctx->queue_mutex, NULL);
+    sem_init(&ctx->job_semaphore, 0, 0);
+#endif
+
+    ctx->threads = malloc(thread_count * sizeof(*ctx->threads));
+
+#ifdef _WIN32
+    for (int i = 0; i < thread_count; ++i) {
+        ctx->threads[i] = CreateThread(NULL, 0, compile_worker, &warg, 0, NULL);
+    }
+#else
+    for (int i = 0; i < thread_count; ++i) {
+        pthread_create(&ctx->threads[i], NULL, compile_worker, &warg);
+    }
+#endif
+
+    for (int i = 0; i < ctx->job_count; ++i) {
+#ifdef _WIN32
+        ReleaseSemaphore(ctx->job_semaphore, 1, NULL);
+#else
+        sem_post(&ctx->job_semaphore);
+#endif
+    }
+
+    for (int i = 0; i < thread_count; ++i) {
+#ifdef _WIN32
+        ReleaseSemaphore(ctx->job_semaphore, 1, NULL);
+#else
+        sem_post(&ctx->job_semaphore);
+#endif
+    }
+
+#ifdef _WIN32
+    WaitForMultipleObjects(thread_count, ctx->threads, TRUE, INFINITE);
+    for (int i = 0; i < thread_count; ++i) {
+        CloseHandle(ctx->threads[i]);
+    }
+    CloseHandle(ctx->job_semaphore);
+    DeleteCriticalSection(&ctx->queue_mutex);
+#else
+    for (int i = 0; i < thread_count; ++i) {
+        pthread_join(ctx->threads[i], NULL);
+    }
+    sem_destroy(&ctx->job_semaphore);
+    pthread_mutex_destroy(&ctx->queue_mutex);
+#endif
+
+    free(ctx->threads);
+    ctx->threads = NULL;
+
+    if (ctx->job_queue) {
+        free(ctx->job_queue);
+        ctx->job_queue = NULL;
+        ctx->job_capacity = 0;
+    }
+
+    if (ctx->build_error) {
+        *error_flag = 1;
     }
 }
 
-/* --- Implementation: Command API --- */
+static void cbuild__apply_config_if_needed(cbuild_context_t* ctx, target_t* t) {
+    if (t->config_applied) return;
+    do {
+        config_t* chain[3];
+        int n = 0;
 
-command_t *cbuild_command(const char *name, const char *command_line) {
-    command_t *cmd = (command_t *)calloc(1, sizeof(command_t));
+        /* Find target-specific config first */
+        config_t* tcfg = NULL;
+        for (int i = 0; i < ctx->cfg_count; ++i) {
+            if (ctx->cfg_targets[i] == t) {
+                tcfg = ctx->cfg_values[i];
+                break;
+            }
+        }
+
+        /* Build config chain: default -> (active OR target) -> target
+         * If target has its own config, skip active_config to avoid flag duplication */
+        chain[n++] = ctx->default_config;
+        if (tcfg) {
+            /* Target has explicit config - use it instead of active config */
+            chain[n++] = tcfg;
+        } else {
+            /* No target config - use active config as fallback */
+            chain[n++] = ctx->active_config;
+        }
+
+        for (int ci = 0; ci < n; ++ci) {
+            config_t* cfg = chain[ci];
+            if (!cfg) continue;
+
+            /* Apply tool overrides */
+            if (cfg->compiler) {
+                if (t->compiler) free(t->compiler);
+                t->compiler = strdup(cfg->compiler);
+                t->cc_kind_override = (int)detect_cc_kind(t->compiler);
+            }
+            if (cfg->linker) {
+                if (t->linker) free(t->linker);
+                t->linker = strdup(cfg->linker);
+            }
+
+            /* Tokenized vectors */
+            for (int i = 0; i < cfg->nincludes; ++i) {
+                ensure_capacity_charpp(ctx, &t->include_dirs, &t->include_count, &t->include_cap);
+                t->include_dirs[t->include_count++] = strdup(cfg->includes[i]);
+            }
+            for (int i = 0; i < cfg->ndefines; ++i) {
+                ensure_capacity_charpp(ctx, &t->defines, &t->define_count, &t->define_cap);
+                t->defines[t->define_count++] = strdup(cfg->defines[i]);
+            }
+            for (int i = 0; i < cfg->ncflags; ++i) {
+                ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                t->cflags[t->cflag_count++] = strdup(cfg->cflags[i]);
+            }
+            for (int i = 0; i < cfg->nldflags; ++i) {
+                ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                t->ldflags[t->ldflag_count++] = strdup(cfg->ldflags[i]);
+            }
+            for (int i = 0; i < cfg->nlibdirs; ++i) {
+                ensure_capacity_charpp(ctx, &t->lib_dirs, &t->lib_dir_count, &t->lib_dir_cap);
+                t->lib_dirs[t->lib_dir_count++] = strdup(cfg->libdirs[i]);
+            }
+            for (int i = 0; i < cfg->nlinklibs; ++i) {
+                ensure_capacity_charpp(ctx, &t->link_libs, &t->link_lib_count, &t->link_lib_cap);
+                t->link_libs[t->link_lib_count++] = strdup(cfg->linklibs[i]);
+            }
+
+            /* Structured knobs → flags */
+            /* Use target's cc_kind_override if set, otherwise fall back to context */
+            cbuild_cc_kind_t effective_cc_kind = (t->cc_kind_override != -1)
+                ? (cbuild_cc_kind_t)t->cc_kind_override : ctx->cc_kind;
+
+            if (cfg->opt_level >= 0) {
+                if (effective_cc_kind == CBUILD_CC_MSVC) {
+                    const char* f = (cfg->opt_level <= 0)   ? "/Od"
+                                    : (cfg->opt_level == 1) ? "/O1"
+                                                            : "/O2";
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup(f);
+                } else {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "-O%d", cfg->opt_level);
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup(buf);
+                }
+            }
+
+            if (cfg->debug_symbols >= 0) {
+                if (cfg->debug_symbols) {
+                    if (effective_cc_kind == CBUILD_CC_MSVC) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("/Zi");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("/DEBUG");
+                    } else {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-g");
+                    }
+                }
+            }
+
+            if (cfg->lto >= 0) {
+                if (effective_cc_kind == CBUILD_CC_MSVC) {
+                    if (cfg->lto) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("/GL");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("/LTCG");
+                    }
+                } else {
+                    if (cfg->lto == 0) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-fno-lto");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("-fno-lto");
+                    } else if (cfg->lto > 0) {
+                        const char* cflag = (cfg->lto == 2) ? "-flto=thin" : "-flto";
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup(cflag);
+                        const char* ldflag = (cfg->lto == 2) ? "-flto=thin" : "-flto";
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup(ldflag);
+                    }
+                }
+            }
+
+            if (cfg->pic >= 0) {
+                if (cfg->pic && effective_cc_kind != CBUILD_CC_MSVC) {
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup("-fPIC");
+                }
+            }
+
+            if (cfg->warnings >= 0) {
+                if (effective_cc_kind == CBUILD_CC_MSVC) {
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup("/W4");
+                } else {
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup("-Wall");
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup("-Wextra");
+                    if (cfg->warnings >= 2) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-Wpedantic");
+                    }
+                }
+            }
+
+            if (cfg->std && *cfg->std) {
+                if (effective_cc_kind == CBUILD_CC_MSVC) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "/std:%s", cfg->std);
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup(buf);
+                } else {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "-std=%s", cfg->std);
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup(buf);
+                }
+            }
+
+            if (cfg->runtime && *cfg->runtime) {
+                if (effective_cc_kind == CBUILD_CC_MSVC) {
+                    const char* f = (strcmp(cfg->runtime, "static") == 0) ? "/MT" : "/MD";
+                    ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                    t->cflags[t->cflag_count++] = strdup(f);
+                }
+            }
+
+            if (cfg->freestanding >= 0) {
+                if (cfg->freestanding) {
+                    if (effective_cc_kind == CBUILD_CC_MSVC) {
+                        /* Omit default library name and default libraries */
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("/Zl");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("/NODEFAULTLIB");
+                    } else {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-ffreestanding");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("-nostdlib");
+                    }
+                }
+            }
+
+            if (cfg->sanitize) {
+                if (effective_cc_kind != CBUILD_CC_MSVC) {
+                    if (cfg->sanitize & 1) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-fsanitize=address");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("-fsanitize=address");
+                    }
+                    if (cfg->sanitize & 2) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-fsanitize=undefined");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("-fsanitize=undefined");
+                    }
+                    if (cfg->sanitize & 4) {
+                        ensure_capacity_charpp(ctx, &t->cflags, &t->cflag_count, &t->cflag_cap);
+                        t->cflags[t->cflag_count++] = strdup("-fsanitize=thread");
+                        ensure_capacity_charpp(ctx, &t->ldflags, &t->ldflag_count, &t->ldflag_cap);
+                        t->ldflags[t->ldflag_count++] = strdup("-fsanitize=thread");
+                    }
+                }
+            }
+        }
+    } while (0);
+    t->config_applied = 1;
+}
+
+static void collect_compile_commands_for_target(cbuild_context_t* ctx, target_t* t) {
+    if (!ctx->generate_compile_commands)
+        return;
+    cbuild__apply_config_if_needed(ctx, t);
+    for (int i = 0; i < t->sources_count; ++i) {
+        const char* src_file = t->sources[i];
+        const char* slash = strrchr(src_file, '/');
+        const char* bslash = strrchr(src_file, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        const char* base = slash ? slash + 1 : src_file;
+        char* dot = strrchr(base, '.');
+        size_t len = dot ? (size_t)(dot - base) : strlen(base);
+        unsigned h = cbuild__hash_path(src_file);
+        char objname[512];
+        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
+
+        /* Build argv exactly as compile_source does */
+        cbuild_argv_t argv;
+        cbuild_argv_init(&argv);
+
+        cbuild_argv_append(&argv, ctx->cc);
+
+        if (ctx->cc_kind == CBUILD_CC_MSVC) {
+            cbuild_argv_append(&argv, "/c");
+            cbuild_argv_append(&argv, "/nologo");
+            char fo_arg[1024];
+            snprintf(fo_arg, sizeof(fo_arg), "/Fo%s", objname);
+            cbuild_argv_append(&argv, fo_arg);
+            cbuild_argv_append(&argv, "/showIncludes");
+        } else {
+            cbuild_argv_append(&argv, "-c");
+            cbuild_argv_append(&argv, "-o");
+            cbuild_argv_append(&argv, objname);
+            /* Note: we don't include -MMD/-MF in compile_commands.json
+               as they're for build system use, not semantic analysis */
+        }
+
+        for (int j = 0; j < ctx->global_cflag_count; ++j) {
+            cbuild_argv_append(&argv, ctx->global_cflags[j]);
+        }
+        for (int j = 0; j < t->cflag_count; ++j) {
+            cbuild_argv_append(&argv, t->cflags[j]);
+        }
+
+        for (int j = 0; j < t->include_count; ++j) {
+            char inc_arg[1024];
+            if (ctx->cc_kind == CBUILD_CC_MSVC) {
+                snprintf(inc_arg, sizeof(inc_arg), "/I%s", t->include_dirs[j]);
+            } else {
+                snprintf(inc_arg, sizeof(inc_arg), "-I%s", t->include_dirs[j]);
+            }
+            cbuild_argv_append(&argv, inc_arg);
+        }
+
+        for (int j = 0; j < ctx->global_def_count; ++j) {
+            char def_arg[512];
+            if (ctx->cc_kind == CBUILD_CC_MSVC) {
+                snprintf(def_arg, sizeof(def_arg), "/D%s", ctx->global_defines[j]);
+            } else {
+                snprintf(def_arg, sizeof(def_arg), "-D%s", ctx->global_defines[j]);
+            }
+            cbuild_argv_append(&argv, def_arg);
+        }
+
+        for (int j = 0; j < t->define_count; ++j) {
+            char def_arg[512];
+            if (ctx->cc_kind == CBUILD_CC_MSVC) {
+                snprintf(def_arg, sizeof(def_arg), "/D%s", t->defines[j]);
+            } else {
+                snprintf(def_arg, sizeof(def_arg), "-D%s", t->defines[j]);
+            }
+            cbuild_argv_append(&argv, def_arg);
+        }
+
+        cbuild_argv_append(&argv, src_file);
+
+        /* Convert argv to command string for compatibility */
+        char* cmd = cbuild_argv_to_cmdline(&argv);
+
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            if (ctx->cc_count + 1 > ctx->cc_cap) {
+                ctx->cc_cap = ctx->cc_cap ? ctx->cc_cap * 2 : 4;
+                ctx->cc_entries = realloc(ctx->cc_entries, ctx->cc_cap * sizeof(*ctx->cc_entries));
+            }
+            ctx->cc_entries[ctx->cc_count].directory = strdup(cwd);
+            ctx->cc_entries[ctx->cc_count].command = cmd;
+
+            /* Store arguments array for tools that prefer it */
+            ctx->cc_entries[ctx->cc_count].argc = argv.count;
+            ctx->cc_entries[ctx->cc_count].arguments = (char**)malloc(argv.count * sizeof(char*));
+            for (int j = 0; j < argv.count; ++j) {
+                ctx->cc_entries[ctx->cc_count].arguments[j] = strdup(argv.args[j]);
+            }
+
+            ctx->cc_entries[ctx->cc_count].file = strdup(src_file);
+            ctx->cc_count++;
+        } else {
+            free(cmd);
+        }
+
+        cbuild_argv_free(&argv);
+    }
+}
+
+command_t* cbuild_command(cbuild_context_t* ctx, const char* name, const char* command_line) {
+    command_t* cmd = (command_t*)calloc(1, sizeof(command_t));
     cmd->name = strdup(name);
-    cmd->command_line = strdup(command_line);
-    // Add to global command list
-    ensure_capacity_charpp((char ***)&g_commands, &g_command_count,
-                           &g_command_cap);
-    g_commands[g_command_count++] = cmd;
+    cmd->command_line = command_line ? strdup(command_line) : NULL;
+    cmd->argv = NULL;
+    cmd->argc = 0;
+    ensure_capacity_charpp(ctx, (char***)&ctx->commands, &ctx->command_count,
+                           &ctx->command_cap);
+    ctx->commands[ctx->command_count++] = cmd;
     return cmd;
 }
 
-void cbuild_target_add_command(target_t *target, command_t *cmd) {
+command_t* cbuild_command_argv(cbuild_context_t* ctx, const char* name, char** argv, int argc) {
+    if (!name || !argv || argc <= 0)
+        return NULL;
+
+    command_t* cmd = (command_t*)calloc(1, sizeof(command_t));
+    cmd->name = strdup(name);
+    cmd->command_line = NULL;
+    cmd->argc = argc;
+    cmd->argv = (char**)calloc(argc + 1, sizeof(char*));
+    for (int i = 0; i < argc; ++i) {
+        cmd->argv[i] = strdup(argv[i]);
+    }
+    cmd->argv[argc] = NULL; /* NULL-terminate for execvp */
+
+    ensure_capacity_charpp(ctx, (char***)&ctx->commands, &ctx->command_count,
+                           &ctx->command_cap);
+    ctx->commands[ctx->command_count++] = cmd;
+
+    return cmd;
+}
+
+void cbuild_target_add_command(cbuild_context_t* ctx, target_t* target, command_t* cmd) {
+    (void)ctx;
     if (!target || !cmd)
         return;
-    ensure_capacity_charpp((char ***)&target->commands, &target->cmd_count,
+    ensure_capacity_charpp(ctx, (char***)&target->commands, &target->cmd_count,
                            &target->cmd_cap);
     target->commands[target->cmd_count++] = cmd;
 }
 
-void cbuild_target_add_cflags(target_t *target, const char *cflags) {
-    if (!target || !cflags)
-        return;
-
-    // If target doesn't have cflags yet, initialize with the provided flags
-    if (!target->cflags) {
-        target->cflags = strdup(cflags);
-    } else {
-        // Otherwise append the new flags with a space separator
-        char *new_cflags =
-            (char *)malloc(strlen(target->cflags) + strlen(cflags) + 2);
-        sprintf(new_cflags, "%s %s", target->cflags, cflags);
-        free(target->cflags);
-        target->cflags = new_cflags;
+int cbuild_add_cflags(cbuild_context_t* ctx, target_t* target, const char* cflags) {
+    if (!ctx || !target || !cflags) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_cflags");
+        return -1;
     }
+    char* copy = strdup(cflags);
+    if (!copy) {
+        cbuild__set_error(ctx, "Out of memory in cbuild_add_cflags");
+        return -1;
+    }
+
+    char* p = copy;
+    while (*p) {
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            } else {
+                p++;
+            }
+        }
+
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            if (ensure_capacity_charpp(ctx, &target->cflags, &target->cflag_count, &target->cflag_cap) != 0) {
+                free(copy);
+                return -1;
+            }
+            target->cflags[target->cflag_count++] = strdup(token);
+
+            *p = saved;
+        }
+    }
+
+    free(copy);
+    return 0;
 }
 
-void cbuild_target_add_post_command(target_t *target, command_t *cmd) {
+int cbuild_add_ldflags(cbuild_context_t* ctx, target_t* target, const char* ldflags) {
+    if (!ctx || !target || !ldflags) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_ldflags");
+        return -1;
+    }
+    char* copy = strdup(ldflags);
+    if (!copy) {
+        cbuild__set_error(ctx, "Out of memory in cbuild_add_ldflags");
+        return -1;
+    }
+
+    char* p = copy;
+    while (*p) {
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            } else {
+                p++;
+            }
+        }
+
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            if (ensure_capacity_charpp(ctx, &target->ldflags, &target->ldflag_count, &target->ldflag_cap) != 0) {
+                free(copy);
+                return -1;
+            }
+            target->ldflags[target->ldflag_count++] = strdup(token);
+
+            *p = saved;
+        }
+    }
+
+    free(copy);
+    return 0;
+}
+
+void cbuild_target_add_post_command(cbuild_context_t* ctx, target_t* target, command_t* cmd) {
     if (!target || !cmd)
         return;
-    ensure_capacity_charpp((char ***)&target->post_commands,
+    ensure_capacity_charpp(ctx, (char***)&target->post_commands,
                            &target->post_cmd_count, &target->post_cmd_cap);
     target->post_commands[target->post_cmd_count++] = cmd;
 }
 
-void cbuild_command_add_dependency(command_t *cmd, command_t *dependency) {
+void cbuild_command_add_dependency(cbuild_context_t* ctx, command_t* cmd, command_t* dependency) {
     if (!cmd || !dependency)
         return;
-    ensure_capacity_charpp((char ***)&cmd->dependencies, &cmd->dep_count,
+    ensure_capacity_charpp(ctx, (char***)&cmd->dependencies, &cmd->dep_count,
                            &cmd->dep_cap);
     cmd->dependencies[cmd->dep_count++] = dependency;
 }
 
-int cbuild_run_command(command_t *cmd) {
+int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
     if (!cmd)
         return -1;
-    // Run dependencies first
     for (int i = 0; i < cmd->dep_count; ++i) {
-        int rc = cbuild_run_command(cmd->dependencies[i]);
+        int rc = cbuild_run_command(ctx, cmd->dependencies[i]);
         if (rc != 0)
             return rc;
     }
     if (cmd->executed)
         return cmd->result;
-    cbuild_pretty_step("COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
-    int rc = run_command(cmd->command_line, 0, NULL);
+
+    cbuild__log_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
+
+    int rc = 0;
+
+    if (cmd->callback) {
+        cmd->callback(cmd->user_data);
+        rc = 0;
+    } else if (cmd->argv && cmd->argc > 0) {
+        /* Argv-based command: shell-free execution */
+        cbuild_argv_t argv;
+        cbuild_argv_init(&argv);
+        for (int i = 0; i < cmd->argc; ++i) {
+            cbuild_argv_append(&argv, cmd->argv[i]);
+        }
+        rc = cbuild_spawn_process(ctx, &argv, 0, NULL);
+        cbuild_argv_free(&argv);
+    } else if (cmd->command_line) {
+        /* Note: user-defined command lines may use shell syntax, so we keep run_command here */
+        rc = run_command(ctx, cmd->command_line, 0, NULL);
+    } else {
+        cbuild__log_status(ctx, 0, "No command or callback in command: %s", cmd->name);
+        rc = -1;
+    }
+
     cmd->executed = 1;
     cmd->result = rc;
+
     if (rc != 0) {
-        cbuild_pretty_status(0, "Command failed: %s", cmd->name);
+        cbuild__log_status(ctx, 0, "Command failed: %s", cmd->name);
     }
+
     return rc;
 }
 
-/* --- Implementation: Subcommand API --- */
-
-void cbuild_register_subcommand(const char *name, target_t *target,
-                                const char *command_line,
+void cbuild_register_subcommand(cbuild_context_t* ctx, const char* name, target_t* target,
+                                const char* command_line,
                                 cbuild_subcommand_callback callback,
-                                void *user_data) {
-    cbuild_subcommand_t *scmd =
-        (cbuild_subcommand_t *)calloc(1, sizeof(cbuild_subcommand_t));
+                                void* user_data) {
+    cbuild_subcommand_t* scmd =
+        (cbuild_subcommand_t*)calloc(1, sizeof(cbuild_subcommand_t));
     scmd->name = strdup(name);
     scmd->target = target;
     scmd->command_line = command_line ? strdup(command_line) : NULL;
     scmd->callback = callback;
     scmd->user_data = user_data;
-    ensure_capacity_charpp((char ***)&g_subcommands, &g_subcommand_count,
-                           &g_subcommand_cap);
-    g_subcommands[g_subcommand_count++] = scmd;
+    ensure_capacity_charpp(ctx, (char***)&ctx->subcommands, &ctx->subcommand_count,
+                           &ctx->subcommand_cap);
+    ctx->subcommands[ctx->subcommand_count++] = scmd;
 }
 
-/* --- Subproject API: Add a subproject to the build system --- */
+command_t* cbuild_command_function(cbuild_context_t* ctx, const char* name,
+                                   cbuild_subcommand_callback callback,
+                                   void* user_data) {
+    if (!name || !callback)
+        return NULL;
 
-subproject_t *cbuild_add_subproject(const char *alias, const char *directory,
-                                    const char *cbuild_exe) {
-    subproject_t *sub = (subproject_t *)calloc(1, sizeof(subproject_t));
+    command_t* cmd = (command_t*)calloc(1, sizeof(command_t));
+    cmd->name = strdup(name);
+    cmd->argv = NULL;
+    cmd->argc = 0;
+    cmd->callback = callback;
+    cmd->user_data = user_data;
+
+    ensure_capacity_charpp(ctx, (char***)&ctx->commands, &ctx->command_count,
+                           &ctx->command_cap);
+    ctx->commands[ctx->command_count++] = cmd;
+
+    return cmd;
+}
+
+subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, const char* directory,
+                                    const char* cbuild_exe) {
+    subproject_t* sub = (subproject_t*)calloc(1, sizeof(subproject_t));
     sub->alias = strdup(alias);
     sub->directory = strdup(directory);
     sub->cbuild_exe = strdup(cbuild_exe);
 
-    // Build command to build the subproject's targets
-    char *cmdline = NULL;
+    char* cmdline = NULL;
 #ifdef _WIN32
     append_format(&cmdline, "cd /d \"%s\" && \"%s\"", directory, cbuild_exe);
 #else
@@ -1850,34 +3560,31 @@ subproject_t *cbuild_add_subproject(const char *alias, const char *directory,
     char build_cmd_name[256];
     snprintf(build_cmd_name, sizeof(build_cmd_name), "build subproject %s",
              alias);
-    sub->build_cmd = cbuild_command(build_cmd_name, cmdline);
+    sub->build_cmd = cbuild_command(ctx, build_cmd_name, cmdline);
     free(cmdline);
 
-    // Register in global subproject list
-    if (g_subproject_count + 1 > g_subproject_cap) {
-        g_subproject_cap = g_subproject_cap ? g_subproject_cap * 2 : 4;
-        g_subprojects =
-            realloc(g_subprojects, g_subproject_cap * sizeof(subproject_t *));
+    if (ctx->subproject_count + 1 > ctx->subproject_cap) {
+        ctx->subproject_cap = ctx->subproject_cap ? ctx->subproject_cap * 2 : 4;
+        ctx->subprojects =
+            realloc(ctx->subprojects, ctx->subproject_cap * sizeof(subproject_t*));
     }
-    g_subprojects[g_subproject_count++] = sub;
+    ctx->subprojects[ctx->subproject_count++] = sub;
     return sub;
 }
 
-target_t *cbuild_subproject_get_target(subproject_t *sub,
-                                       const char *tgt_name) {
+target_t* cbuild_subproject_get_target(cbuild_context_t* ctx, subproject_t* sub,
+                                       const char* tgt_name) {
     if (!sub)
         return NULL;
-    cbuild_subproject_target_t *stgt =
+    cbuild_subproject_target_t* stgt =
         cbuild__find_subproject_target(sub, tgt_name);
     if (!stgt) {
-        fprintf(stderr, "cbuild: Subproject '%s' has no target named '%s'\n",
-                sub->alias, tgt_name);
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Subproject '%s' has no target named '%s'", sub->alias, tgt_name);
         return NULL;
     }
     if (stgt->proxy_target)
         return stgt->proxy_target;
 
-    // Create a proxy target_t
     cbuild_target_type type;
     if (strcmp(stgt->type, "static_lib") == 0) {
         type = TARGET_STATIC_LIB;
@@ -1886,299 +3593,571 @@ target_t *cbuild_subproject_get_target(subproject_t *sub,
     } else if (strcmp(stgt->type, "executable") == 0) {
         type = TARGET_EXECUTABLE;
     } else {
-        fprintf(stderr, "cbuild: Unknown subproject target type: %s\n", stgt->type);
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Unknown subproject target type: %s", stgt->type);
         return NULL;
     }
 
-    // Name the proxy as "<alias>_<tgt_name>"
     char proxy_name[256];
     snprintf(proxy_name, sizeof(proxy_name), "%s_%s", sub->alias, stgt->name);
-    target_t *proxy = (target_t *)calloc(1, sizeof(target_t));
+    target_t* proxy = (target_t*)calloc(1, sizeof(target_t));
     proxy->type = type;
     proxy->name = strdup(proxy_name);
+    proxy->external = 1;
 
-    // Output file is subproject_dir + "/" + output_path
     proxy->output_file = cbuild__join_path(sub->directory, stgt->output_path);
     proxy->obj_dir = NULL;  // not used
 
-    // Add the subproject build command as a dependency
     proxy->commands = NULL;
     proxy->cmd_count = proxy->cmd_cap = 0;
-    cbuild_target_add_command(proxy, sub->build_cmd);
+    cbuild_target_add_command(ctx, proxy, sub->build_cmd);
 
-    // Add to global targets list so it can be linked
-    ensure_capacity_charpp((char ***)&g_targets, &g_target_count, &g_target_cap);
-    g_targets[g_target_count++] = proxy;
+    ensure_capacity_charpp(ctx, (char***)&ctx->targets, &ctx->target_count, &ctx->target_cap);
+    ctx->targets[ctx->target_count++] = proxy;
 
     stgt->proxy_target = proxy;
     return proxy;
 }
 
-/* --- End Subproject API Implementation --- */
-
-/* --- Implementation: Public API Functions --- */
-
-target_t *cbuild_executable(const char *name) {
-    return cbuild_create_target(name, TARGET_EXECUTABLE);
+target_t* cbuild_executable(cbuild_context_t* ctx, const char* name) {
+    return cbuild_create_target(ctx, name, TARGET_EXECUTABLE);
 }
 
-target_t *cbuild_static_library(const char *name) {
-    return cbuild_create_target(name, TARGET_STATIC_LIB);
+target_t* cbuild_static_library(cbuild_context_t* ctx, const char* name) {
+    return cbuild_create_target(ctx, name, TARGET_STATIC_LIB);
 }
 
-target_t *cbuild_shared_library(const char *name) {
-    return cbuild_create_target(name, TARGET_SHARED_LIB);
+target_t* cbuild_shared_library(cbuild_context_t* ctx, const char* name) {
+    return cbuild_create_target(ctx, name, TARGET_SHARED_LIB);
 }
 
-void cbuild_add_source(target_t *target, const char *source_file) {
+target_t* cbuild_dummy_target(cbuild_context_t* ctx, const char* name) {
+    return cbuild_create_target(ctx, name, TARGET_DUMMY);
+}
+
+target_t* cbuild_file_dep_target(cbuild_context_t* ctx, const char* name, const char* file_path) {
+    target_t* t = cbuild_create_target(ctx, name, TARGET_FILE_DEP);
+    // repurpose output_file to mean required file
+    if (t && file_path)
+        t->output_file = strdup(file_path);
+    return t;
+}
+
+int cbuild_add_source(cbuild_context_t* ctx, target_t* target, const char* source_file) {
+    if (!ctx || !target || !source_file) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_source");
+        return -1;
+    }
     if (strchr(source_file, '*') || strchr(source_file, '?')) {
-        // This is a wildcard pattern
-        char **expanded_files = NULL;
+        char** expanded_files = NULL;
         int file_count = 0;
 
         if (cbuild_expand_wildcard(source_file, &expanded_files, &file_count) ==
                 0 &&
             file_count > 0) {
             for (int i = 0; i < file_count; i++) {
-                ensure_capacity_charpp(&target->sources, &target->sources_count,
-                                       &target->sources_cap);
+                if (ensure_capacity_charpp(ctx, &target->sources, &target->sources_count,
+                                       &target->sources_cap) != 0) {
+                    for (int j = i; j < file_count; j++) free(expanded_files[j]);
+                    free(expanded_files);
+                    return -1;
+                }
                 target->sources[target->sources_count++] =
-                    expanded_files[i];  // Transfer ownership
+                    expanded_files[i];
             }
-            free(expanded_files);  // Just free the array, not the strings
-        } else {
-            fprintf(stderr, "Warning: No files found matching pattern '%s'\n",
-                    source_file);
+            free(expanded_files);
         }
     } else {
-        // Regular file path
-        ensure_capacity_charpp(&target->sources, &target->sources_count,
-                               &target->sources_cap);
-        target->sources[target->sources_count++] = strdup(source_file);
+        if (ensure_capacity_charpp(ctx, &target->sources, &target->sources_count,
+                               &target->sources_cap) != 0) {
+            return -1;
+        }
+        /* Normalize path separators for consistent hashing on Windows */
+        target->sources[target->sources_count++] = cbuild__normalize_path(source_file);
     }
+    return 0;
 }
 
-void cbuild_add_include_dir(target_t *target, const char *include_dir) {
+int cbuild_add_include_dir(cbuild_context_t* ctx, target_t* target, const char* include_dir) {
+    if (!ctx || !target || !include_dir) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_include_dir");
+        return -1;
+    }
     if (strchr(include_dir, '*') || strchr(include_dir, '?')) {
-        // This is a wildcard pattern
-        char **expanded_dirs = NULL;
+        char** expanded_dirs = NULL;
         int dir_count = 0;
 
         if (cbuild_expand_wildcard(include_dir, &expanded_dirs, &dir_count) == 0 &&
             dir_count > 0) {
             for (int i = 0; i < dir_count; i++) {
                 if (cbuild_dir_exists(expanded_dirs[i])) {
-                    ensure_capacity_charpp(&target->include_dirs, &target->include_count,
-                                           &target->include_cap);
+                    if (ensure_capacity_charpp(ctx, &target->include_dirs, &target->include_count,
+                                           &target->include_cap) != 0) {
+                        for (int j = i; j < dir_count; j++) free(expanded_dirs[j]);
+                        free(expanded_dirs);
+                        return -1;
+                    }
                     target->include_dirs[target->include_count++] =
-                        expanded_dirs[i];  // Transfer ownership
+                        expanded_dirs[i];
                 } else {
-                    free(expanded_dirs[i]);  // Not a directory, free it
+                    free(expanded_dirs[i]);
                 }
             }
-            free(expanded_dirs);  // Just free the array
+            free(expanded_dirs);
         } else {
-            fprintf(stderr, "Warning: No directories found matching pattern '%s'\n",
-                    include_dir);
+            cbuild__log(ctx, CBUILD_LOG_WARNING, "No directories found matching pattern '%s'", include_dir);
         }
     } else {
-        // Regular directory path
-        ensure_capacity_charpp(&target->include_dirs, &target->include_count,
-                               &target->include_cap);
-        target->include_dirs[target->include_count++] = strdup(include_dir);
+        if (ensure_capacity_charpp(ctx, &target->include_dirs, &target->include_count,
+                               &target->include_cap) != 0) {
+            return -1;
+        }
+        /* Normalize path separators for consistent signature comparison on Windows */
+        target->include_dirs[target->include_count++] = cbuild__normalize_path(include_dir);
     }
+    return 0;
 }
 
-void cbuild_add_library_dir(target_t *target, const char *lib_dir) {
+int cbuild_add_library_dir(cbuild_context_t* ctx, target_t* target, const char* lib_dir) {
+    if (!ctx || !target || !lib_dir) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_library_dir");
+        return -1;
+    }
     if (strchr(lib_dir, '*') || strchr(lib_dir, '?')) {
-        // This is a wildcard pattern
-        char **expanded_dirs = NULL;
+        char** expanded_dirs = NULL;
         int dir_count = 0;
 
         if (cbuild_expand_wildcard(lib_dir, &expanded_dirs, &dir_count) == 0 &&
             dir_count > 0) {
             for (int i = 0; i < dir_count; i++) {
                 if (cbuild_dir_exists(expanded_dirs[i])) {
-                    ensure_capacity_charpp(&target->lib_dirs, &target->lib_dir_count,
-                                           &target->lib_dir_cap);
+                    if (ensure_capacity_charpp(ctx, &target->lib_dirs, &target->lib_dir_count,
+                                           &target->lib_dir_cap) != 0) {
+                        for (int j = i; j < dir_count; j++) free(expanded_dirs[j]);
+                        free(expanded_dirs);
+                        return -1;
+                    }
                     target->lib_dirs[target->lib_dir_count++] =
-                        expanded_dirs[i];  // Transfer ownership
+                        expanded_dirs[i];
                 } else {
-                    free(expanded_dirs[i]);  // Not a directory, free it
+                    free(expanded_dirs[i]);
                 }
             }
-            free(expanded_dirs);  // Just free the array
+            free(expanded_dirs);
         } else {
-            fprintf(stderr, "Warning: No directories found matching pattern '%s'\n",
-                    lib_dir);
+            cbuild__log(ctx, CBUILD_LOG_WARNING, "No directories found matching pattern '%s'", lib_dir);
         }
     } else {
-        // Regular directory path
-        ensure_capacity_charpp(&target->lib_dirs, &target->lib_dir_count,
-                               &target->lib_dir_cap);
-        target->lib_dirs[target->lib_dir_count++] = strdup(lib_dir);
+        if (ensure_capacity_charpp(ctx, &target->lib_dirs, &target->lib_dir_count,
+                               &target->lib_dir_cap) != 0) {
+            return -1;
+        }
+        /* Normalize path separators for consistent signature comparison on Windows */
+        target->lib_dirs[target->lib_dir_count++] = cbuild__normalize_path(lib_dir);
     }
+    return 0;
 }
 
-void cbuild_add_link_library(target_t *target, const char *lib) {
+int cbuild_add_link_library(cbuild_context_t* ctx, target_t* target, const char* lib) {
+    if (!ctx || !target || !lib) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_link_library");
+        return -1;
+    }
     if (strchr(lib, '*') || strchr(lib, '?')) {
-        // This is a wildcard pattern
-        char **expanded_files = NULL;
+        char** expanded_files = NULL;
         int file_count = 0;
 
         if (cbuild_expand_wildcard(lib, &expanded_files, &file_count) == 0 &&
             file_count > 0) {
             for (int i = 0; i < file_count; i++) {
-                ensure_capacity_charpp(&target->link_libs, &target->link_lib_count,
-                                       &target->link_lib_cap);
+                if (ensure_capacity_charpp(ctx, &target->link_libs, &target->link_lib_count,
+                                       &target->link_lib_cap) != 0) {
+                    for (int j = i; j < file_count; j++) free(expanded_files[j]);
+                    free(expanded_files);
+                    return -1;
+                }
                 target->link_libs[target->link_lib_count++] =
-                    expanded_files[i];  // Transfer ownership
+                    expanded_files[i];
             }
-            free(expanded_files);  // Just free the array
+            free(expanded_files);
         } else {
-            fprintf(stderr, "Warning: No libraries found matching pattern '%s'\n",
-                    lib);
+            cbuild__log(ctx, CBUILD_LOG_WARNING, "No libraries found matching pattern '%s'", lib);
         }
     } else {
-        // Regular library path
-        ensure_capacity_charpp(&target->link_libs, &target->link_lib_count,
-                               &target->link_lib_cap);
-        target->link_libs[target->link_lib_count++] = strdup(lib);
+        if (ensure_capacity_charpp(ctx, &target->link_libs, &target->link_lib_count,
+                               &target->link_lib_cap) != 0) {
+            return -1;
+        }
+        /* Normalize path separators for consistent signature comparison on Windows */
+        target->link_libs[target->link_lib_count++] = cbuild__normalize_path(lib);
+    }
+    return 0;
+}
+
+int cbuild_add_expose_library(cbuild_context_t* ctx, target_t* target, const char* lib_path) {
+    if (!ctx || !target || !lib_path) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_expose_library");
+        return -1;
+    }
+
+    /* Tokenize once and store tokens directly */
+    char* copy = strdup(lib_path);
+    if (!copy) {
+        cbuild__set_error(ctx, "Out of memory in cbuild_add_expose_library");
+        return -1;
+    }
+
+    char* p = copy;
+    while (*p) {
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            } else {
+                p++;
+            }
+        }
+
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            if (ensure_capacity_charpp(ctx, &target->exposed_libs, &target->exposed_lib_count,
+                                   &target->exposed_lib_cap) != 0) {
+                free(copy);
+                return -1;
+            }
+            /* Normalize path separators for consistent signature comparison on Windows */
+            target->exposed_libs[target->exposed_lib_count++] = cbuild__normalize_path(token);
+
+            *p = saved;
+        }
+    }
+
+    free(copy);
+    return 0;
+}
+
+int cbuild_export_symbols(cbuild_context_t* ctx, target_t* target) {
+    if (!ctx || !target) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_export_symbols");
+        return -1;
+    }
+
+#if defined(__linux__) || (defined(__unix__) && !defined(__APPLE__))
+    return cbuild_add_ldflags(ctx, target, "-Wl,-E");
+#elif defined(__APPLE__)
+    return 0;
+#elif defined(_WIN32)
+    cbuild__log(ctx, CBUILD_LOG_WARNING, "cbuild_export_symbols() has limited effect on Windows. For MSVC, use /EXPORT:symbol or a .def file. For MinGW, consider cbuild_add_ldflags(ctx, target, \"-Wl,--export-all-symbols\").");
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+int cbuild_add_link_target(cbuild_context_t* ctx, target_t* dependant, target_t* dependency) {
+    if (!ctx || !dependant || !dependency) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_link_target");
+        return -1;
+    }
+
+    if (ensure_capacity_charpp(ctx, (char***)&dependant->dependencies,
+                               &dependant->dep_count, &dependant->dep_cap) != 0) {
+        return -1;
+    }
+    dependant->dependencies[dependant->dep_count++] = dependency;
+    return 0;
+}
+
+void cbuild_set_output_dir(cbuild_context_t* ctx, const char* dir) {
+    if (ctx->output_dir) {
+        free(ctx->output_dir);
+    }
+    /* Normalize path separators for consistent path handling on Windows */
+    ctx->output_dir = cbuild__normalize_path(dir);
+}
+
+void cbuild_set_parallelism(cbuild_context_t* ctx, int jobs_count) {
+    ctx->parallel_jobs = jobs_count;
+}
+
+void cbuild_set_compiler(cbuild_context_t* ctx, const char* compiler_exe) {
+    if (ctx->cc) free(ctx->cc);
+    ctx->cc = strdup(compiler_exe);
+    ctx->cc_kind = detect_cc_kind(compiler_exe);
+
+    if (ctx->ar) free(ctx->ar);
+    if (ctx->cc_kind == CBUILD_CC_MSVC) {
+        ctx->ar = strdup("lib");
+    } else {
+        ctx->ar = strdup("ar");
+    }
+
+    if (ctx->ld) free(ctx->ld);
+    if (ctx->cc_kind == CBUILD_CC_MSVC) {
+        ctx->ld = strdup("cl");
+    } else {
+        ctx->ld = strdup(ctx->cc);
     }
 }
 
-void cbuild_target_link_library(target_t *dependant, target_t *dependency) {
-    if (dependency) {
-        ensure_capacity_charpp((char ***)&dependant->dependencies,
-                               &dependant->dep_count, &dependant->dep_cap);
-        dependant->dependencies[dependant->dep_count++] = dependency;
+void cbuild_set_linker(cbuild_context_t* ctx, const char* linker_exe) {
+    if (ctx->ld) free(ctx->ld);
+    ctx->ld = strdup(linker_exe);
+}
+
+void cbuild_set_archiver(cbuild_context_t* ctx, const char* archiver_exe) {
+    if (ctx->ar) free(ctx->ar);
+    ctx->ar = strdup(archiver_exe);
+}
+
+void cbuild_target_set_linker(cbuild_context_t* ctx, target_t* t, const char* linker_exe) {
+    (void)ctx;
+    if (!t) return;
+    if (t->linker) free(t->linker);
+    t->linker = linker_exe ? strdup(linker_exe) : NULL;
+}
+
+void cbuild_set_output_file(cbuild_context_t* ctx, target_t* t, const char* path) {
+    (void)ctx;
+    if (!t || !path) return;
+    if (t->output_file) free(t->output_file);
+    /* Normalize path separators for consistent path handling on Windows */
+    t->output_file = cbuild__normalize_path(path);
+}
+
+void cbuild_set_soname(cbuild_context_t* ctx, target_t* t, const char* soname) {
+    (void)ctx;
+    if (!t || !soname) return;
+    if (t->soname) free(t->soname);
+    t->soname = strdup(soname);
+}
+
+void cbuild_set_build_type(cbuild_context_t* ctx, const char* build_type) {
+    if (!build_type) return;
+
+    // Detect compiler kind if not already set
+    if (ctx->cc == NULL) {
+        ctx->cc_kind = detect_cc_kind(NULL);
     }
-}
 
-void cbuild_set_output_dir(const char *dir) {
-    if (g_output_dir) {
-        free(g_output_dir);
+    if (strcmp(build_type, "Debug") == 0) {
+        if (ctx->cc_kind == CBUILD_CC_MSVC) {
+            // MSVC Debug: /Zi (debug info), /Od (no optimization), /RTC1 (runtime checks)
+            cbuild_add_global_cflags(ctx, "/Zi /Od /RTC1");
+            cbuild_add_global_ldflags(ctx, "/DEBUG");
+        } else {
+            // GCC/Clang Debug: -g (debug info), -O0 (no optimization)
+            cbuild_add_global_cflags(ctx, "-g -O0");
+        }
+    } else if (strcmp(build_type, "Release") == 0) {
+        if (ctx->cc_kind == CBUILD_CC_MSVC) {
+            // MSVC Release: /O2 (optimize for speed), /DNDEBUG
+            cbuild_add_global_cflags(ctx, "/O2");
+            cbuild_add_global_define(ctx, "NDEBUG");
+        } else {
+            // GCC/Clang Release: -O3 (aggressive optimization), -DNDEBUG
+            cbuild_add_global_cflags(ctx, "-O3");
+            cbuild_add_global_define(ctx, "NDEBUG");
+        }
     }
-    g_output_dir = strdup(dir);
+    // If build_type is neither "Debug" nor "Release", do nothing
+    // This allows users to pass empty string or custom values without error
 }
 
-void cbuild_set_parallelism(int jobs_count) {
-    g_parallel_jobs = jobs_count;
-}
+void cbuild_add_global_cflags(cbuild_context_t* ctx, const char* flags) {
+    if (!flags) return;
+    char* copy = strdup(flags);
+    if (!copy) return;
 
-void cbuild_set_compiler(const char *compiler_exe) {
-    if (g_cc)
-        free(g_cc);
-    g_cc = strdup(compiler_exe);
-    if (strstr(compiler_exe, "cl") != NULL &&
-        strstr(compiler_exe, "clang") == NULL) {
-        if (g_ar)
-            free(g_ar);
-        g_ar = strdup("lib");
-    } else if (strstr(compiler_exe, "cl") == NULL) {
-        if (g_ar)
-            free(g_ar);
-        g_ar = strdup("ar");
+    char* p = copy;
+    while (*p) {
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            } else {
+                p++;
+            }
+        }
+
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            ensure_capacity_charpp(ctx, &ctx->global_cflags, &ctx->global_cflag_count, &ctx->global_cflag_cap);
+            ctx->global_cflags[ctx->global_cflag_count++] = strdup(token);
+
+            *p = saved;
+        }
     }
+
+    free(copy);
 }
 
-void cbuild_add_global_cflags(const char *flags) {
-    append_format(&g_global_cflags, "%s ", flags);
+void cbuild_add_global_ldflags(cbuild_context_t* ctx, const char* flags) {
+    if (!flags) return;
+    char* copy = strdup(flags);
+    if (!copy) return;
+
+    char* p = copy;
+    while (*p) {
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t')) {
+                break;
+            } else {
+                p++;
+            }
+        }
+
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            ensure_capacity_charpp(ctx, &ctx->global_ldflags, &ctx->global_ldflag_count, &ctx->global_ldflag_cap);
+            ctx->global_ldflags[ctx->global_ldflag_count++] = strdup(token);
+
+            *p = saved;
+        }
+    }
+
+    free(copy);
 }
 
-void cbuild_add_global_ldflags(const char *flags) {
-    append_format(&g_global_ldflags, "%s ", flags);
-}
-
-/* ---------- Implementation: Pre‑processor define API ------------------- */
-
-static void cbuild__add_define_to_list(char ***arr,
-                                       int *count,
-                                       int *cap,
-                                       const char *macro,
-                                       const char *value_optional) {
-    char *entry = NULL;
-    if (value_optional)
-        append_format(&entry, "%s=%s", macro, value_optional);
-    else
+static int cbuild__add_define_to_list(cbuild_context_t* ctx, char*** arr, int* count, int* cap,
+                                       const char* macro,
+                                       const char* value_optional) {
+    char* entry = NULL;
+    if (value_optional) {
+        if (append_format(&entry, "%s=%s", macro, value_optional) != 0) {
+            cbuild__set_error(ctx, "Out of memory in cbuild__add_define_to_list");
+            return -1;
+        }
+    } else {
         entry = strdup(macro);
+        if (!entry) {
+            cbuild__set_error(ctx, "Out of memory in cbuild__add_define_to_list");
+            return -1;
+        }
+    }
 
-    ensure_capacity_charpp(arr, count, cap);
+    if (ensure_capacity_charpp(ctx, arr, count, cap) != 0) {
+        free(entry);
+        return -1;
+    }
     (*arr)[(*count)++] = entry;
+    return 0;
 }
 
-/* Per‑target convenience ------------------------------------------------- */
-
-void cbuild_add_define(target_t *t, const char *macro) {
-    if (t && macro)
-        cbuild__add_define_to_list(&t->defines,
-                                   &t->define_count,
-                                   &t->define_cap,
-                                   macro, NULL);
+int cbuild_add_define(cbuild_context_t* ctx, target_t* t, const char* macro) {
+    if (!ctx || !t || !macro) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_define");
+        return -1;
+    }
+    return cbuild__add_define_to_list(ctx, &t->defines, &t->define_count, &t->define_cap,
+                                      macro, NULL);
 }
 
-void cbuild_add_define_val(target_t *t, const char *macro, const char *val) {
-    if (t && macro)
-        cbuild__add_define_to_list(&t->defines,
-                                   &t->define_count,
-                                   &t->define_cap,
-                                   macro, val);
+int cbuild_add_define_val(cbuild_context_t* ctx, target_t* t, const char* macro, const char* val) {
+    if (!ctx || !t || !macro) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_define_val");
+        return -1;
+    }
+    return cbuild__add_define_to_list(ctx, &t->defines, &t->define_count, &t->define_cap,
+                                      macro, val);
 }
 
-void cbuild_set_flag(target_t *t, const char *flag, int value) {
+int cbuild_add_flag(cbuild_context_t* ctx, target_t* t, const char* flag, int value) {
+    if (!ctx || !t || !flag) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_flag");
+        return -1;
+    }
     char buf[32];
     snprintf(buf, sizeof(buf), "%d", !!value);
-    cbuild_add_define_val(t, flag, buf);
+    return cbuild_add_define_val(ctx, t, flag, buf);
 }
 
-/* Global variants -------------------------------------------------------- */
-
-void cbuild_add_global_define(const char *macro) {
+void cbuild_add_global_define(cbuild_context_t* ctx, const char* macro) {
     if (macro)
-        cbuild__add_define_to_list(&g_global_defines,
-                                   &g_global_def_count,
-                                   &g_global_def_cap,
-                                   macro, NULL);
+        cbuild__add_define_to_list(ctx, &ctx->global_defines, &ctx->global_def_count,
+                                   &ctx->global_def_cap, macro, NULL);
 }
 
-void cbuild_add_global_define_val(const char *macro, const char *val) {
+void cbuild_add_global_define_val(cbuild_context_t* ctx, const char* macro, const char* val) {
     if (macro)
-        cbuild__add_define_to_list(&g_global_defines,
-                                   &g_global_def_count,
-                                   &g_global_def_cap,
-                                   macro, val);
+        cbuild__add_define_to_list(ctx, &ctx->global_defines, &ctx->global_def_count,
+                                   &ctx->global_def_cap, macro, val);
 }
 
-void cbuild_set_global_flag(const char *flag, int value) {
+void cbuild_add_global_flag(cbuild_context_t* ctx, const char* flag, int value) {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d", !!value);
-    cbuild_add_global_define_val(flag, buf);
+    cbuild_add_global_define_val(ctx, flag, buf);
 }
 
-/* Static variables for DFS build function */
-static int *visited = NULL;
-static int *in_stack = NULL;
-
-/* DFS build function (extended to handle commands as dependencies) */
-static void dfs_command_func(command_t *cmd, int *error_flag_ptr) {
+static void dfs_command_func(cbuild_context_t* ctx, command_t* cmd, int* error_flag_ptr) {
     if (!cmd || *error_flag_ptr)
         return;
     if (cmd->executed)
         return;
     for (int i = 0; i < cmd->dep_count; ++i) {
-        dfs_command_func(cmd->dependencies[i], error_flag_ptr);
+        dfs_command_func(ctx, cmd->dependencies[i], error_flag_ptr);
         if (*error_flag_ptr)
             return;
     }
-    if (cbuild_run_command(cmd) != 0) {
+    if (cbuild_run_command(ctx, cmd) != 0) {
         *error_flag_ptr = 1;
     }
 }
 
-static void dfs_build_func(target_t *t, int *error_flag_ptr) {
+static void dfs_build_func(cbuild_context_t* ctx, target_t* t, int* error_flag_ptr) {
     int ti = -1;
-    for (int j = 0; j < g_target_count; ++j) {
-        if (g_targets[j] == t) {
+    for (int j = 0; j < ctx->target_count; ++j) {
+        if (ctx->targets[j] == t) {
             ti = j;
             break;
         }
@@ -2187,46 +4166,50 @@ static void dfs_build_func(target_t *t, int *error_flag_ptr) {
         return;
     if (*error_flag_ptr)
         return;
-    if (in_stack[ti]) {
-        fprintf(stderr, "cbuild: Error - circular dependency involving %s\n",
-                t->name);
+    if (ctx->in_stack[ti]) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: circular dependency involving %s", t->name);
         *error_flag_ptr = 1;
         return;
     }
-    if (visited[ti])
+    if (ctx->visited[ti])
         return;
-    in_stack[ti] = 1;
-    // Run command dependencies first
+    ctx->in_stack[ti] = 1;
+
+    if (t->type == TARGET_FILE_DEP) {
+        build_target(ctx, t, error_flag_ptr);
+        ctx->visited[ti] = 1;
+        ctx->in_stack[ti] = 0;
+        return;
+    }
+
     for (int ci = 0; ci < t->cmd_count; ++ci) {
-        dfs_command_func(t->commands[ci], error_flag_ptr);
+        dfs_command_func(ctx, t->commands[ci], error_flag_ptr);
         if (*error_flag_ptr) {
-            in_stack[ti] = 0;
+            ctx->in_stack[ti] = 0;
             return;
         }
     }
-    // Then build target dependencies
+
     for (int di = 0; di < t->dep_count; ++di) {
-        dfs_build_func(t->dependencies[di], error_flag_ptr);
+        dfs_build_func(ctx, t->dependencies[di], error_flag_ptr);
         if (*error_flag_ptr) {
-            in_stack[ti] = 0;
+            ctx->in_stack[ti] = 0;
             return;
         }
     }
-    build_target(t, error_flag_ptr);
-    // Run post-build commands
+    build_target(ctx, t, error_flag_ptr);
     for (int pci = 0; pci < t->post_cmd_count; ++pci) {
-        dfs_command_func(t->post_commands[pci], error_flag_ptr);
+        dfs_command_func(ctx, t->post_commands[pci], error_flag_ptr);
         if (*error_flag_ptr) {
-            in_stack[ti] = 0;
+            ctx->in_stack[ti] = 0;
             return;
         }
     }
-    visited[ti] = 1;
-    in_stack[ti] = 0;
+    ctx->visited[ti] = 1;
+    ctx->in_stack[ti] = 0;
 }
 
-// Helper to write a JSON string with proper escaping
-static void fprint_json_string(FILE *f, const char *s) {
+static void fprint_json_string(FILE* f, const char* s) {
     fputc('"', f);
     for (; *s; ++s) {
         switch (*s) {
@@ -2262,204 +4245,784 @@ static void fprint_json_string(FILE *f, const char *s) {
     fputc('"', f);
 }
 
-int cbuild_run(int argc, char **argv) {
-    cbuild_init();
+/* ---------- Flag callback helpers ---------- */
 
-    // Always clear compile_commands entries at the start of each build
-    if (g_cc_entries) {
-        for (int i = 0; i < g_cc_count; ++i) {
-            free(g_cc_entries[i].directory);
-            free(g_cc_entries[i].command);
-            free(g_cc_entries[i].file);
-        }
-        free(g_cc_entries);
-        g_cc_entries = NULL;
+static int cbuild__flag_on_verbose(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    ctx->verbose = 1;
+    return 0;
+}
+
+static int cbuild__flag_on_target(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    if (!v || !*v) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: --target requires a name");
+        return 1;
     }
-    g_cc_count = 0;
-    g_cc_cap = 0;
+    ensure_capacity_charpp(ctx, &ctx->target_filters, &ctx->target_filter_count, &ctx->target_filter_cap);
+    ctx->target_filters[ctx->target_filter_count++] = strdup(v);
+    return 0;
+}
 
-    // Pre-collect compile commands for all targets before building
-    if (g_generate_compile_commands) {
-        for (int i = 0; i < g_target_count; ++i) {
-            collect_compile_commands_for_target(g_targets[i]);
-        }
-    }
+static int cbuild__flag_on_compile_commands(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild_enable_compile_commands(ctx, 1);
+    return 0;
+}
 
-    // --- Subproject manifest mode ---
-    if (argc > 1 && strcmp(argv[1], "--manifest") == 0) {
-        // Print manifest: one line per target: TYPE NAME PATH
-        for (int i = 0; i < g_target_count; ++i) {
-            target_t *t = g_targets[i];
-            // Only print "real" targets (not proxy targets for subprojects)
-            if (!t->output_file || !t->name)
-                continue;
-            // Guess type string
-            const char *type = NULL;
-            switch (t->type) {
-                case TARGET_STATIC_LIB:
-                    type = "static_lib";
-                    break;
-                case TARGET_SHARED_LIB:
-                    type = "shared_lib";
-                    break;
-                case TARGET_EXECUTABLE:
-                    type = "executable";
-                    break;
-                default:
-                    continue;
-            }
-            // Output path relative to cwd (assume output_file is relative)
-            printf("%s %s %s\n", type, t->name, t->output_file);
-        }
-        return 0;
-    }
-    if (argc > 1) {
-        if (strcmp(argv[1], "clean") == 0) {
-            cbuild_pretty_step("CLEAN", CBUILD_COLOR_YELLOW,
-                               "Cleaning build outputs...");
-
-            // First clean all subprojects
-            for (int i = 0; i < g_subproject_count; ++i) {
-                subproject_t *sub = g_subprojects[i];
-                char *clean_cmd = NULL;
-
-                cbuild_pretty_step("CLEAN", CBUILD_COLOR_YELLOW,
-                                   "Cleaning subproject: %s", sub->alias);
-#ifdef _WIN32
-                append_format(&clean_cmd, "cd /d \"%s\" && \"%s\" clean",
-                              sub->directory, sub->cbuild_exe);
-#else
-                append_format(&clean_cmd, "cd '%s' && '%s' clean", sub->directory,
-                              sub->cbuild_exe);
-#endif
-                int result = run_command(clean_cmd, 0, NULL);
-                free(clean_cmd);
-
-                if (result != 0) {
-                    fprintf(stderr, "Warning: Failed to clean subproject '%s'\n",
-                            sub->alias);
-                }
-            }
-
-            // Then clean the main project
-            for (int i = 0; i < g_target_count; ++i) {
-                target_t *t = g_targets[i];
-                if (t->obj_dir)
-                    remove_dir_recursive(t->obj_dir);
-                if (t->output_file)
-                    remove_file(t->output_file);
-            }
-
-            remove_dir_recursive(g_output_dir);
-            cbuild_pretty_status(1, "Clean complete.");
-            return 0;
-        }
-        // Check for custom subcommands
-        for (int sci = 0; sci < g_subcommand_count; ++sci) {
-            cbuild_subcommand_t *scmd = g_subcommands[sci];
-            if (strcmp(argv[1], scmd->name) == 0) {
-                // Build the dependency target first
-                int error_flag = 0;
-                // Allocate and clear visited/in_stack arrays
-                if (visited)
-                    free(visited);
-                if (in_stack)
-                    free(in_stack);
-                visited = calloc(g_target_count, sizeof(int));
-                in_stack = calloc(g_target_count, sizeof(int));
-                dfs_build_func(scmd->target, &error_flag);
-                free(visited);
-                visited = NULL;
-                free(in_stack);
-                in_stack = NULL;
-                if (error_flag) {
-                    cbuild_pretty_status(0, "Build failed.");
-                    return 1;
-                }
-                // Run the subcommand
-                int rc = 0;
-                if (scmd->command_line) {
-                    cbuild_pretty_step("SUBCMD", CBUILD_COLOR_BLUE, "Running '%s': %s",
-                                       scmd->name, scmd->command_line);
-                    rc = run_command(scmd->command_line, 0, NULL);
-                } else if (scmd->callback) {
-                    cbuild_pretty_step("SUBCMD", CBUILD_COLOR_BLUE,
-                                       "Running '%s' (callback)...", scmd->name);
-                    scmd->callback(scmd->user_data);
-                }
-                return rc;
-            }
-        }
-    }
-    int error_flag = 0;
-    // Allocate and clear visited/in_stack arrays
-    if (visited)
-        free(visited);
-    if (in_stack)
-        free(in_stack);
-    visited = calloc(g_target_count, sizeof(int));
-    in_stack = calloc(g_target_count, sizeof(int));
-
-    for (int i = 0; i < g_target_count; ++i) {
-        if (!visited[i]) {
-            dfs_build_func(g_targets[i], &error_flag);
-            if (error_flag)
+static int cbuild__flag_on_list(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    char buf[8192];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "Available targets:");
+    for (int i = 0; i < ctx->target_count; ++i) {
+        target_t* t = ctx->targets[i];
+        if (!t->name) continue;
+        const char* type_str = "unknown";
+        switch (t->type) {
+            case TARGET_EXECUTABLE:
+                type_str = "executable";
+                break;
+            case TARGET_STATIC_LIB:
+                type_str = "static_lib";
+                break;
+            case TARGET_SHARED_LIB:
+                type_str = "shared_lib";
+                break;
+            case TARGET_COMMAND:
+                type_str = "command";
+                break;
+            case TARGET_DUMMY:
+                type_str = "dummy";
+                break;
+            case TARGET_FILE_DEP:
+                type_str = "file_dep";
                 break;
         }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "\n  %-20s  [%s]", t->name, type_str);
+        if (t->output_file) pos += snprintf(buf + pos, sizeof(buf) - pos, "  -> %s", t->output_file);
     }
-    free(visited);
-    visited = NULL;
-    free(in_stack);
-    in_stack = NULL;
+    cbuild__log(ctx, CBUILD_LOG_INFO, "%s", buf);
+    return CBUILD_FLAG_EXIT;
+}
+
+/* Pretty-print build graph */
+static const char* cbuild__type_str(cbuild_target_type tt) {
+    switch (tt) {
+        case TARGET_EXECUTABLE:
+            return "executable";
+        case TARGET_STATIC_LIB:
+            return "static_lib";
+        case TARGET_SHARED_LIB:
+            return "shared_lib";
+        case TARGET_COMMAND:
+            return "command";
+        case TARGET_DUMMY:
+            return "dummy";
+        case TARGET_FILE_DEP:
+            return "file_dep";
+        default:
+            return "unknown";
+    }
+}
+
+static int cbuild__idx_of_target(cbuild_context_t* ctx, target_t* t) {
+    for (int i = 0; i < ctx->target_count; ++i) {
+        if (ctx->targets[i] == t) return i;
+    }
+    return -1;
+}
+
+static void cbuild__print_graph_rec(cbuild_context_t* ctx, target_t* t, int* visiting, int depth) {
+    int ti = cbuild__idx_of_target(ctx, t);
+    if (ti >= 0) {
+        if (visiting[ti]) {
+            const char* cyc_name = t->name ? t->name : (t->output_file ? t->output_file : "(unnamed)");
+            cbuild__log(ctx, CBUILD_LOG_INFO, "%*s-> (cycle to %s)", depth * 2, "", cyc_name);
+            return;
+        }
+        visiting[ti] = 1;
+    }
+
+    for (int i = 0; i < t->dep_count; ++i) {
+        target_t* dep = t->dependencies[i];
+        const char* dep_name = dep->name ? dep->name : (dep->output_file ? dep->output_file : "(unnamed)");
+        cbuild__log(ctx, CBUILD_LOG_INFO, "%*s-> %s [%s]", depth * 2, "", dep_name, cbuild__type_str(dep->type));
+        cbuild__print_graph_rec(ctx, dep, visiting, depth + 1);
+    }
+
+    if (ti >= 0) visiting[ti] = 0;
+}
+
+static int cbuild__flag_on_graph(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+
+    cbuild__log(ctx, CBUILD_LOG_INFO, "Build graph:");
+    if (ctx->target_count == 0) {
+        cbuild__log(ctx, CBUILD_LOG_INFO, "  (no targets)");
+        return CBUILD_FLAG_EXIT;
+    }
+
+    int* indegree = (int*)calloc(ctx->target_count, sizeof(int));
+    if (indegree) {
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            for (int d = 0; d < t->dep_count; ++d) {
+                target_t* dep = t->dependencies[d];
+                for (int j = 0; j < ctx->target_count; ++j) {
+                    if (ctx->targets[j] == dep) {
+                        indegree[j]++;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    int* visiting = (int*)calloc(ctx->target_count, sizeof(int));
+    if (visiting) {
+        int roots = 0;
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            /* Skip orphan FILE_DEPs unless something depends on them */
+            if (t->type == TARGET_FILE_DEP && indegree && indegree[i] == 0) continue;
+
+            if (!indegree || indegree[i] == 0) {
+                const char* name = t->name ? t->name : (t->output_file ? t->output_file : "(unnamed)");
+                cbuild__log(ctx, CBUILD_LOG_INFO, "%s [%s]", name, cbuild__type_str(t->type));
+                cbuild__print_graph_rec(ctx, t, visiting, 1);
+                roots++;
+            }
+        }
+        /* If no roots (cycle-only graph), print all once */
+        if (roots == 0) {
+            for (int i = 0; i < ctx->target_count; ++i) {
+                target_t* t = ctx->targets[i];
+                const char* name = t->name ? t->name : (t->output_file ? t->output_file : "(unnamed)");
+                cbuild__log(ctx, CBUILD_LOG_INFO, "%s [%s]", name, cbuild__type_str(t->type));
+                cbuild__print_graph_rec(ctx, t, visiting, 1);
+            }
+        }
+        free(visiting);
+    }
+    if (indegree) free(indegree);
+
+    return CBUILD_FLAG_EXIT;
+}
+
+/* Reverse dependency (consumers) graph */
+static int cbuild__find_target_by_name(cbuild_context_t* ctx, const char* name) {
+    if (!name) return -1;
+    for (int i = 0; i < ctx->target_count; ++i) {
+        target_t* t = ctx->targets[i];
+        if (t->name && strcmp(t->name, name) == 0) return i;
+    }
+    return -1;
+}
+
+static void cbuild__print_consumers_rec(cbuild_context_t* ctx, int tgt_idx, int* visiting, int depth) {
+    for (int i = 0; i < ctx->target_count; ++i) {
+        target_t* t = ctx->targets[i];
+        int depends = 0;
+        for (int d = 0; d < t->dep_count; ++d) {
+            if (t->dependencies[d] == ctx->targets[tgt_idx]) {
+                depends = 1;
+                break;
+            }
+        }
+        if (!depends) continue;
+
+        if (visiting[i]) {
+            const char* cyc_name = t->name ? t->name : (t->output_file ? t->output_file : "(unnamed)");
+            cbuild__log(ctx, CBUILD_LOG_INFO, "%*s-> (cycle to %s)", depth * 2, "", cyc_name);
+            continue;
+        }
+        const char* name = t->name ? t->name : (t->output_file ? t->output_file : "(unnamed)");
+        cbuild__log(ctx, CBUILD_LOG_INFO, "%*s-> %s [%s]", depth * 2, "", name, cbuild__type_str(t->type));
+        visiting[i] = 1;
+        cbuild__print_consumers_rec(ctx, i, visiting, depth + 1);
+        visiting[i] = 0;
+    }
+}
+
+static int cbuild__flag_on_deps(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    if (!v || !*v) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: --deps requires a target name");
+        return 1;
+    }
+    int idx = cbuild__find_target_by_name(ctx, v);
+    if (idx < 0) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: target '%s' not found", v);
+        return 1;
+    }
+    target_t* root = ctx->targets[idx];
+    const char* name = root->name ? root->name : (root->output_file ? root->output_file : "(unnamed)");
+    cbuild__log(ctx, CBUILD_LOG_INFO, "%s [%s]", name, cbuild__type_str(root->type));
+    int* visiting = (int*)calloc(ctx->target_count, sizeof(int));
+    if (visiting) {
+        cbuild__print_consumers_rec(ctx, idx, visiting, 1);
+        free(visiting);
+    }
+    return CBUILD_FLAG_EXIT;
+}
+
+static int cbuild__flag_on_manifest(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    for (int i = 0; i < ctx->target_count; ++i) {
+        target_t* t = ctx->targets[i];
+        if (!t->output_file || !t->name) continue;
+        const char* type = NULL;
+        switch (t->type) {
+            case TARGET_STATIC_LIB:
+                type = "static_lib";
+                break;
+            case TARGET_SHARED_LIB:
+                type = "shared_lib";
+                break;
+            case TARGET_EXECUTABLE:
+                type = "executable";
+                break;
+            default:
+                continue;
+        }
+        cbuild__log(ctx, CBUILD_LOG_INFO, "%s %s %s", type, t->name, t->output_file);
+    }
+    return CBUILD_FLAG_EXIT;
+}
+
+static int cbuild__flag_on_clean(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild_clean(ctx);
+    return CBUILD_FLAG_EXIT;
+}
+
+static int cbuild__flag_on_run(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    if (!v || !*v) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: --run needs a name");
+        return 1;
+    }
+    ctx->run_subcmd = v;
+    return 0;
+}
+
+static int cbuild__flag_on_help(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild__print_help(ctx);
+    return CBUILD_FLAG_EXIT;
+}
+
+/* Recalculate target output paths based on per-target or active config.
+ * Called after PRE flags are processed so config changes take effect.
+ * Also resets config_applied flag so the full config (flags, optimizations, etc.)
+ * gets applied with the correct active config. */
+static void cbuild__resolve_target_paths(cbuild_context_t* ctx) {
+    const char *default_output_dir = ctx->active_config ? (ctx->active_config->output_dir ? ctx->active_config->output_dir : ctx->output_dir) : ctx->output_dir;
+
+    for (int i = 0; i < ctx->target_count; ++i) {
+        target_t* t = ctx->targets[i];
+
+        /* Skip targets whose paths must not be derived from this context. */
+        if (t->external || t->type == TARGET_COMMAND || t->type == TARGET_DUMMY || t->type == TARGET_FILE_DEP) {
+            continue;
+        }
+
+        /* Look up per-target config to get its output_dir if set */
+        const char *output_dir = default_output_dir;
+        for (int j = 0; j < ctx->cfg_count; ++j) {
+            if (ctx->cfg_targets[j] == t && ctx->cfg_values[j] && ctx->cfg_values[j]->output_dir) {
+                output_dir = ctx->cfg_values[j]->output_dir;
+                break;
+            }
+        }
+
+        /* Free old paths */
+        if (t->output_file) {
+            free(t->output_file);
+            t->output_file = NULL;
+        }
+        if (t->obj_dir) {
+            free(t->obj_dir);
+            t->obj_dir = NULL;
+        }
+
+        /* Recalculate output_file based on type */
+        char *out = NULL;
+        if (t->type == TARGET_EXECUTABLE) {
+#ifdef _WIN32
+            append_format(&out, "%s/%s.exe", output_dir, t->name);
+#else
+            append_format(&out, "%s/%s", output_dir, t->name);
+#endif
+        } else if (t->type == TARGET_STATIC_LIB) {
+#ifdef _WIN32
+            append_format(&out, "%s/%s.lib", output_dir, t->name);
+#else
+            append_format(&out, "%s/lib%s.a", output_dir, t->name);
+#endif
+        } else if (t->type == TARGET_SHARED_LIB) {
+#ifdef _WIN32
+            append_format(&out, "%s/%s.dll", output_dir, t->name);
+#elif __APPLE__
+            append_format(&out, "%s/lib%s.dylib", output_dir, t->name);
+#else
+            append_format(&out, "%s/lib%s.so", output_dir, t->name);
+#endif
+        }
+
+        /* Recalculate obj_dir */
+        char *obj = NULL;
+        append_format(&obj, "%s/obj_%s", output_dir, t->name);
+
+        t->output_file = out;
+        t->obj_dir = obj;
+    }
+}
+
+int cbuild_clean(cbuild_context_t* ctx) {
+    cbuild_init(ctx);
+    cbuild__resolve_target_paths(ctx);
+
+    cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
+    for (int i = 0; i < ctx->subproject_count; ++i) {
+        subproject_t* sub = ctx->subprojects[i];
+        cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
+        char old_cwd[PATH_MAX];
+        if (cbuild_get_cwd(old_cwd, sizeof(old_cwd)) == 0) {
+            if (chdir(sub->directory) == 0) {
+                cbuild_argv_t avv;
+                cbuild_argv_init(&avv);
+                cbuild_argv_append(&avv, sub->cbuild_exe);
+                cbuild_argv_append(&avv, "--clean");
+                (void)cbuild_spawn_process(ctx, &avv, 0, NULL);
+                cbuild_argv_free(&avv);
+                chdir(old_cwd);
+            }
+        }
+    }
+    for (int i = 0; i < ctx->target_count; ++i) {
+        target_t* t = ctx->targets[i];
+        if (t->external) continue; /* cleaned by its owning subproject */
+        if (t->obj_dir) remove_dir_recursive(ctx, t->obj_dir);
+        if (t->output_file) remove_file(ctx, t->output_file);
+    }
+    remove_dir_recursive(ctx, ctx->output_dir);
+    cbuild__log_status(ctx, 1, "Clean complete.");
+    return 0;
+}
+
+int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
+    cbuild_init(ctx);
+    cbuild__resolve_target_paths(ctx);
+
+    if (ctx->cc_entries) {
+        for (int i = 0; i < ctx->cc_count; ++i) {
+            free(ctx->cc_entries[i].directory);
+            free(ctx->cc_entries[i].command);
+            free(ctx->cc_entries[i].file);
+            if (ctx->cc_entries[i].arguments) {
+                for (int j = 0; j < ctx->cc_entries[i].argc; ++j) {
+                    free(ctx->cc_entries[i].arguments[j]);
+                }
+                free(ctx->cc_entries[i].arguments);
+            }
+        }
+        free(ctx->cc_entries);
+        ctx->cc_entries = NULL;
+    }
+    ctx->cc_count = 0;
+    ctx->cc_cap = 0;
+
+    if (ctx->job_queue) {
+        free(ctx->job_queue);
+        ctx->job_queue = NULL;
+        ctx->job_capacity = 0;
+    }
+
+    if (ctx->generate_compile_commands) {
+        for (int i = 0; i < ctx->target_count; ++i) {
+            collect_compile_commands_for_target(ctx, ctx->targets[i]);
+        }
+    }
+
+    int error_flag = 0;
+    if (ctx->visited) free(ctx->visited);
+    if (ctx->in_stack) free(ctx->in_stack);
+    ctx->visited = calloc(ctx->target_count, sizeof(int));
+    ctx->in_stack = calloc(ctx->target_count, sizeof(int));
+
+    if (target_name) {
+        target_t* target_to_build = NULL;
+        for (int i = 0; i < ctx->target_count; ++i) {
+            if (ctx->targets[i]->name && strcmp(ctx->targets[i]->name, target_name) == 0) {
+                target_to_build = ctx->targets[i];
+                break;
+            }
+        }
+        if (!target_to_build) {
+            cbuild__set_error(ctx, "Target '%s' not found", target_name);
+            cbuild__log(ctx, CBUILD_LOG_ERROR, "Target '%s' not found", target_name);
+            free(ctx->visited);
+            free(ctx->in_stack);
+            ctx->visited = NULL;
+            ctx->in_stack = NULL;
+            return -1;
+        }
+        dfs_build_func(ctx, target_to_build, &error_flag);
+    } else {
+        int* indegree = calloc(ctx->target_count, sizeof(int));
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            for (int d = 0; d < t->dep_count; ++d) {
+                target_t* dep = t->dependencies[d];
+                for (int j = 0; j < ctx->target_count; ++j) {
+                    if (ctx->targets[j] == dep) {
+                        indegree[j]++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            if (t->type == TARGET_FILE_DEP && indegree[i] == 0) continue;
+            if (!ctx->visited[i]) {
+                dfs_build_func(ctx, t, &error_flag);
+                if (error_flag) break;
+            }
+        }
+        free(indegree);
+    }
+
+    free(ctx->visited);
+    ctx->visited = NULL;
+    free(ctx->in_stack);
+    ctx->in_stack = NULL;
+
     if (!error_flag) {
-        // Dump compile_commands.json if enabled
-        if (g_generate_compile_commands) {
+        if (ctx->generate_compile_commands) {
+            const char* output_dir = ctx->active_config ? (ctx->active_config->output_dir ? ctx->active_config->output_dir : ctx->output_dir) : ctx->output_dir;
+            ensure_dir_exists(output_dir);
             char path[1024];
-            snprintf(path, sizeof(path), "%s/compile_commands.json", g_output_dir);
-            FILE *f = fopen(path, "w");
+            snprintf(path, sizeof(path), "%s/compile_commands.json", output_dir);
+            FILE* f = fopen(path, "w");
             if (f) {
                 fprintf(f, "[\n");
-                for (int i = 0; i < g_cc_count; i++) {
-                    fprintf(f, "  {\"directory\":");
-                    fprint_json_string(f, g_cc_entries[i].directory);
-                    fprintf(f, ",\"command\":");
-                    fprint_json_string(f, g_cc_entries[i].command);
-                    fprintf(f, ",\"file\":");
-                    fprint_json_string(f, g_cc_entries[i].file);
-                    fprintf(f, "}%s\n", (i + 1 < g_cc_count) ? "," : "");
+                for (int i = 0; i < ctx->cc_count; i++) {
+                    fprintf(f, "  {\n    \"directory\": ");
+                    fprint_json_string(f, ctx->cc_entries[i].directory);
+                    fprintf(f, ",\n    \"arguments\": [");
+                    for (int j = 0; j < ctx->cc_entries[i].argc; ++j) {
+                        if (j > 0) fprintf(f, ", ");
+                        fprint_json_string(f, ctx->cc_entries[i].arguments[j]);
+                    }
+                    fprintf(f, "],\n    \"file\": ");
+                    fprint_json_string(f, ctx->cc_entries[i].file);
+                    fprintf(f, "\n  }%s\n", (i + 1 < ctx->cc_count) ? "," : "");
                 }
                 fprintf(f, "]\n");
                 fclose(f);
             }
         }
-        cbuild_pretty_status(1, "Build succeeded.");
+        cbuild__log_status(ctx, 1, "Build succeeded.");
         return 0;
     } else {
-        cbuild_pretty_status(0, "Build failed.");
+        cbuild__log_status(ctx, 0, "Build failed.");
+        return -1;
+    }
+}
+
+int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv) {
+    cbuild_init(ctx);
+    ctx->argv0_for_help = (argv && argv[0]) ? argv[0] : "cbuild";
+
+    cbuild_register_flag(ctx, "verbose", 'v', 0, CBUILD_FLAG_PRE, "Verbose output", cbuild__flag_on_verbose, ctx);
+    cbuild_register_flag_int(ctx, "jobs", 'j', CBUILD_FLAG_PRE,
+                             "Number of parallel compile jobs", &ctx->parallel_jobs);
+    cbuild_register_flag(ctx, "target", 't', 1, CBUILD_FLAG_PRE,
+                         "Build only the specified target", cbuild__flag_on_target, ctx);
+    cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
+                         "Emit compile_commands.json into the output dir", cbuild__flag_on_compile_commands, ctx);
+    cbuild_register_flag(ctx, "help", 'h', 0, CBUILD_FLAG_PRE, "Show help and exit", cbuild__flag_on_help, ctx);
+
+    int rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_PRE, &argc, &argv);
+    if (rc == CBUILD_FLAG_EXIT) return CBUILD_FLAG_EXIT;
+    if (rc) return rc;
+
+    if (argc > 1) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
+        return 1;
+    }
+
+    return 0;
+}
+
+int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
+    cbuild_init(ctx);
+
+    ctx->argv0_for_help = (argv && argv[0]) ? argv[0] : "cbuild";
+
+    cbuild_register_flag(ctx, "verbose", 'v', 0, CBUILD_FLAG_PRE, "Verbose output", cbuild__flag_on_verbose, ctx);
+    cbuild_register_flag_int(ctx, "jobs", 'j', CBUILD_FLAG_PRE,
+                             "Number of parallel compile jobs", &ctx->parallel_jobs);
+    cbuild_register_flag(ctx, "target", 't', 1, CBUILD_FLAG_PRE,
+                         "Build only the specified target", cbuild__flag_on_target, ctx);
+    cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
+                         "Emit compile_commands.json into the output dir", cbuild__flag_on_compile_commands, ctx);
+    cbuild_register_flag(ctx, "list", 'l', 0, CBUILD_FLAG_PRE,
+                         "List targets and exit", cbuild__flag_on_list, ctx);
+    cbuild_register_flag(ctx, "graph", 0, 0, CBUILD_FLAG_PRE,
+                         "Pretty print build graph and exit", cbuild__flag_on_graph, ctx);
+    cbuild_register_flag(ctx, "deps", 0, 1, CBUILD_FLAG_PRE,
+                         "Print reverse dependency (consumers) graph for the given target and exit", cbuild__flag_on_deps, ctx);
+    cbuild_register_flag(ctx, "manifest", 0, 0, CBUILD_FLAG_PRE,
+                         "Print subproject manifest format and exit", cbuild__flag_on_manifest, ctx);
+    cbuild_register_flag(ctx, "clean", 0, 0, CBUILD_FLAG_PRE,
+                         "Remove build outputs and exit", cbuild__flag_on_clean, ctx);
+    cbuild_register_flag(ctx, "run", 'r', 1, CBUILD_FLAG_PRE,
+                         "Run a registered subcommand after building its target", cbuild__flag_on_run, ctx);
+    cbuild_register_flag(ctx, "help", 'h', 0, CBUILD_FLAG_PRE, "Show help and exit", cbuild__flag_on_help, ctx);
+
+    int rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_PRE, &argc, &argv);
+    if (rc == CBUILD_FLAG_EXIT) return 0;
+    if (rc) return rc;
+
+    cbuild__resolve_target_paths(ctx);
+
+    if (argc > 1) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
+        cbuild__log(ctx, CBUILD_LOG_INFO, "hint: use flags (try --help)");
+        return 1;
+    }
+
+    if (ctx->run_subcmd) {
+        int error_flag = 0;
+
+        if (ctx->visited) free(ctx->visited);
+        if (ctx->in_stack) free(ctx->in_stack);
+        ctx->visited = calloc(ctx->target_count, sizeof(int));
+        ctx->in_stack = calloc(ctx->target_count, sizeof(int));
+
+        cbuild_subcommand_t* match = NULL;
+        for (int i = 0; i < ctx->subcommand_count; ++i) {
+            if (strcmp(ctx->subcommands[i]->name, ctx->run_subcmd) == 0) {
+                match = ctx->subcommands[i];
+                break;
+            }
+        }
+        if (!match) {
+            cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unknown subcommand '%s'", ctx->run_subcmd);
+            free(ctx->visited);
+            ctx->visited = NULL;
+            free(ctx->in_stack);
+            ctx->in_stack = NULL;
+            return 1;
+        }
+
+        rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_BEFORE_BUILD, &argc, &argv);
+        if (rc == CBUILD_FLAG_EXIT) {
+            free(ctx->visited);
+            free(ctx->in_stack);
+            return 0;
+        }
+        if (rc) {
+            free(ctx->visited);
+            free(ctx->in_stack);
+            return rc;
+        }
+
+        dfs_build_func(ctx, match->target, &error_flag);
+
+        free(ctx->visited);
+        ctx->visited = NULL;
+        free(ctx->in_stack);
+        ctx->in_stack = NULL;
+
+        if (error_flag) {
+            cbuild__log_status(ctx, 0, "Build failed.");
+            return 1;
+        }
+
+        int sub_rc = 0;
+        if (match->command_line) {
+            cbuild__log_step(ctx, "SUBCMD", CBUILD_COLOR_BLUE, "Running '%s': %s", match->name, match->command_line);
+            sub_rc = run_command(ctx, match->command_line, 0, NULL);
+        } else if (match->callback) {
+            cbuild__log_step(ctx, "SUBCMD", CBUILD_COLOR_BLUE, "Running '%s' (callback)...", match->name);
+            match->callback(match->user_data);
+        }
+
+        if (sub_rc == 0) {
+            rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_AFTER_BUILD, &argc, &argv);
+            if (rc == CBUILD_FLAG_EXIT) return 0;
+            if (rc) return rc;
+        }
+        return sub_rc;
+    }
+
+    if (ctx->cc_entries) {
+        for (int i = 0; i < ctx->cc_count; ++i) {
+            free(ctx->cc_entries[i].directory);
+            free(ctx->cc_entries[i].command);
+            free(ctx->cc_entries[i].file);
+            if (ctx->cc_entries[i].arguments) {
+                for (int j = 0; j < ctx->cc_entries[i].argc; ++j) {
+                    free(ctx->cc_entries[i].arguments[j]);
+                }
+                free(ctx->cc_entries[i].arguments);
+            }
+        }
+        free(ctx->cc_entries);
+        ctx->cc_entries = NULL;
+    }
+    ctx->cc_count = 0;
+    ctx->cc_cap = 0;
+
+    if (ctx->job_queue) {
+        free(ctx->job_queue);
+        ctx->job_queue = NULL;
+        ctx->job_capacity = 0;
+    }
+
+    if (ctx->generate_compile_commands) {
+        for (int i = 0; i < ctx->target_count; ++i) {
+            collect_compile_commands_for_target(ctx, ctx->targets[i]);
+        }
+    }
+
+    int error_flag = 0;
+    if (ctx->visited) free(ctx->visited);
+    if (ctx->in_stack) free(ctx->in_stack);
+    ctx->visited = calloc(ctx->target_count, sizeof(int));
+    ctx->in_stack = calloc(ctx->target_count, sizeof(int));
+
+    rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_BEFORE_BUILD, &argc, &argv);
+    if (rc == CBUILD_FLAG_EXIT) {
+        free(ctx->visited);
+        free(ctx->in_stack);
+        return 0;
+    }
+    if (rc) {
+        free(ctx->visited);
+        free(ctx->in_stack);
+        return rc;
+    }
+
+    if (ctx->target_filter_count > 0) {
+        for (int f = 0; f < ctx->target_filter_count; ++f) {
+            target_t* target_to_build = NULL;
+            for (int i = 0; i < ctx->target_count; ++i) {
+                if (ctx->targets[i]->name && strcmp(ctx->targets[i]->name, ctx->target_filters[f]) == 0) {
+                    target_to_build = ctx->targets[i];
+                    break;
+                }
+            }
+            if (!target_to_build) {
+                cbuild__log(ctx, CBUILD_LOG_ERROR, "Target '%s' not found", ctx->target_filters[f]);
+                cbuild__log(ctx, CBUILD_LOG_INFO, "Use --list to see available targets");
+                free(ctx->visited);
+                free(ctx->in_stack);
+                return 1;
+            }
+            dfs_build_func(ctx, target_to_build, &error_flag);
+            if (error_flag) break;
+        }
+    } else {
+        int* indegree = calloc(ctx->target_count, sizeof(int));
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            for (int d = 0; d < t->dep_count; ++d) {
+                target_t* dep = t->dependencies[d];
+                for (int j = 0; j < ctx->target_count; ++j) {
+                    if (ctx->targets[j] == dep) {
+                        indegree[j]++;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            if (t->type == TARGET_FILE_DEP && indegree[i] == 0) continue;
+            if (!ctx->visited[i]) {
+                dfs_build_func(ctx, t, &error_flag);
+                if (error_flag) break;
+            }
+        }
+        free(indegree);
+    }
+    free(ctx->visited);
+    ctx->visited = NULL;
+    free(ctx->in_stack);
+    ctx->in_stack = NULL;
+
+    if (!error_flag) {
+        rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_AFTER_BUILD, &argc, &argv);
+        if (rc == CBUILD_FLAG_EXIT) return 0;
+        if (rc) return rc;
+
+        if (ctx->generate_compile_commands) {
+            const char* output_dir = ctx->active_config ? (ctx->active_config->output_dir ? ctx->active_config->output_dir : ctx->output_dir) : ctx->output_dir;
+            ensure_dir_exists(output_dir);
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/compile_commands.json", output_dir);
+            FILE* f = fopen(path, "w");
+            if (f) {
+                fprintf(f, "[\n");
+                for (int i = 0; i < ctx->cc_count; i++) {
+                    fprintf(f, "  {\n    \"directory\": ");
+                    fprint_json_string(f, ctx->cc_entries[i].directory);
+                    fprintf(f, ",\n    \"arguments\": [");
+                    for (int j = 0; j < ctx->cc_entries[i].argc; ++j) {
+                        if (j > 0) fprintf(f, ", ");
+                        fprint_json_string(f, ctx->cc_entries[i].arguments[j]);
+                    }
+                    fprintf(f, "],\n    \"file\": ");
+                    fprint_json_string(f, ctx->cc_entries[i].file);
+                    fprintf(f, "\n  }%s\n", (i + 1 < ctx->cc_count) ? "," : "");
+                }
+                fprintf(f, "]\n");
+                fclose(f);
+            }
+        }
+        cbuild__log_status(ctx, 1, "Build succeeded.");
+        return 0;
+    } else {
+        cbuild__log_status(ctx, 0, "Build failed.");
         return 1;
     }
 }
 
-// Initialize global/default build settings
-static void cbuild_init() {
-    if (!g_output_dir)
-        g_output_dir = strdup("build");
-    if (!g_cc)
-        g_cc = strdup("cc");
-    if (!g_ar)
-        g_ar = strdup("ar");
-#if defined(_WIN32)
-    if (!g_ld)
-        g_ld = strdup("ld");
-#elif defined(__APPLE__) || defined(__linux__)
-    if (!g_ld)
-        g_ld = strdup(g_cc);  // Use compiler as linker on macOS/Linux
+static void cbuild_init(cbuild_context_t* ctx) {
+    if (!ctx->output_dir)
+        ctx->output_dir = strdup("build");
+
+    if (!ctx->cc) {
+#ifdef _WIN32
+        ctx->cc = strdup("cl");
+        ctx->cc_kind = CBUILD_CC_MSVC;
 #else
-    if (!g_ld)
-        g_ld = strdup("ld");
+        ctx->cc = strdup("cc");
+        ctx->cc_kind = CBUILD_CC_GCC_CLANG;
 #endif
-    if (g_parallel_jobs <= 0) {
-        // Try to detect CPU count
+    } else {
+        ctx->cc_kind = detect_cc_kind(ctx->cc);
+    }
+
+    if (!ctx->ar) ctx->ar = strdup(ctx->cc_kind == CBUILD_CC_MSVC ? "lib" : "ar");
+    if (!ctx->ld) ctx->ld = strdup(ctx->cc_kind == CBUILD_CC_MSVC ? "cl" : ctx->cc);
+
+    if (ctx->parallel_jobs <= 0) {
         int n = 1;
 #ifdef _WIN32
         SYSTEM_INFO sysinfo;
@@ -2470,61 +5033,338 @@ static void cbuild_init() {
         if (cpus > 0)
             n = (int)cpus;
 #endif
-        g_parallel_jobs = n > 0 ? n : 1;
+        ctx->parallel_jobs = n > 0 ? n : 1;
     }
 }
 
-// Create a new target struct and add to global list
-static target_t *cbuild_create_target(const char *name,
+/* Internal teardown - frees all resources, leaves ctx in zeroed state */
+void cbuild_teardown(cbuild_context_t* ctx) {
+    // Free DFS state
+    if (ctx->visited) {
+        free(ctx->visited);
+        ctx->visited = NULL;
+    }
+    if (ctx->in_stack) {
+        free(ctx->in_stack);
+        ctx->in_stack = NULL;
+    }
+
+    // Free targets
+    if (ctx->targets) {
+        for (int i = 0; i < ctx->target_count; ++i) {
+            target_t* t = ctx->targets[i];
+            if (!t) continue;
+            if (t->name) free(t->name);
+
+            if (t->sources) {
+                for (int j = 0; j < t->sources_count; ++j) free(t->sources[j]);
+                free(t->sources);
+            }
+            if (t->include_dirs) {
+                for (int j = 0; j < t->include_count; ++j) free(t->include_dirs[j]);
+                free(t->include_dirs);
+            }
+            if (t->lib_dirs) {
+                for (int j = 0; j < t->lib_dir_count; ++j) free(t->lib_dirs[j]);
+                free(t->lib_dirs);
+            }
+            if (t->link_libs) {
+                for (int j = 0; j < t->link_lib_count; ++j) free(t->link_libs[j]);
+                free(t->link_libs);
+            }
+            if (t->exposed_libs) {
+                for (int j = 0; j < t->exposed_lib_count; ++j) free(t->exposed_libs[j]);
+                free(t->exposed_libs);
+            }
+            if (t->dependencies) free(t->dependencies);
+            if (t->cflags) {
+                for (int j = 0; j < t->cflag_count; ++j) free(t->cflags[j]);
+                free(t->cflags);
+            }
+            if (t->ldflags) {
+                for (int j = 0; j < t->ldflag_count; ++j) free(t->ldflags[j]);
+                free(t->ldflags);
+            }
+            if (t->output_file) free(t->output_file);
+            if (t->obj_dir) free(t->obj_dir);
+            if (t->commands) free(t->commands);
+            if (t->post_commands) free(t->post_commands);
+            if (t->defines) {
+                for (int j = 0; j < t->define_count; ++j) free(t->defines[j]);
+                free(t->defines);
+            }
+            if (t->soname) free(t->soname);
+            if (t->compiler) free(t->compiler);
+            if (t->linker) free(t->linker);
+            free(t);
+        }
+        free(ctx->targets);
+    }
+    ctx->targets = NULL;
+    ctx->target_count = 0;
+    ctx->target_cap = 0;
+
+    // Free commands
+    if (ctx->commands) {
+        for (int i = 0; i < ctx->command_count; ++i) {
+            command_t* c = ctx->commands[i];
+            if (!c) continue;
+            if (c->name) free(c->name);
+            if (c->command_line) free(c->command_line);
+            if (c->argv) {
+                for (int j = 0; j < c->argc; ++j) free(c->argv[j]);
+                free(c->argv);
+            }
+            if (c->dependencies) free(c->dependencies);
+            free(c);
+        }
+        free(ctx->commands);
+    }
+    ctx->commands = NULL;
+    ctx->command_count = 0;
+    ctx->command_cap = 0;
+
+    // Free subcommands
+    if (ctx->subcommands) {
+        for (int i = 0; i < ctx->subcommand_count; ++i) {
+            cbuild_subcommand_t* sc = ctx->subcommands[i];
+            if (!sc) continue;
+            if (sc->name) free(sc->name);
+            if (sc->command_line) free(sc->command_line);
+            // sc->target and sc->user_data are not owned
+            free(sc);
+        }
+        free(ctx->subcommands);
+    }
+    ctx->subcommands = NULL;
+    ctx->subcommand_count = 0;
+    ctx->subcommand_cap = 0;
+
+    // Free subprojects
+    if (ctx->subprojects) {
+        for (int i = 0; i < ctx->subproject_count; ++i) {
+            subproject_t* sp = ctx->subprojects[i];
+            if (!sp) continue;
+            if (sp->alias) free(sp->alias);
+            if (sp->directory) free(sp->directory);
+            if (sp->cbuild_exe) free(sp->cbuild_exe);
+            if (sp->targets) {
+                for (int j = 0; j < sp->target_count; ++j) {
+                    if (sp->targets[j].name) free(sp->targets[j].name);
+                    if (sp->targets[j].type) free(sp->targets[j].type);
+                    if (sp->targets[j].output_path) free(sp->targets[j].output_path);
+                    // proxy_target is a normal target and freed with ctx->targets
+                }
+                free(sp->targets);
+            }
+            // build_cmd is a command_t managed by ctx->commands
+            free(sp);
+        }
+        free(ctx->subprojects);
+    }
+    ctx->subprojects = NULL;
+    ctx->subproject_count = 0;
+    ctx->subproject_cap = 0;
+
+    // Free global defines
+    if (ctx->global_defines) {
+        for (int i = 0; i < ctx->global_def_count; ++i) free(ctx->global_defines[i]);
+        free(ctx->global_defines);
+    }
+    ctx->global_defines = NULL;
+    ctx->global_def_count = 0;
+    ctx->global_def_cap = 0;
+
+    // Free target filters
+    if (ctx->target_filters) {
+        for (int i = 0; i < ctx->target_filter_count; ++i) free(ctx->target_filters[i]);
+        free(ctx->target_filters);
+    }
+    ctx->target_filters = NULL;
+    ctx->target_filter_count = 0;
+    ctx->target_filter_cap = 0;
+
+    // Free compile_commands entries
+    if (ctx->cc_entries) {
+        for (int i = 0; i < ctx->cc_count; ++i) {
+            if (ctx->cc_entries[i].directory) free(ctx->cc_entries[i].directory);
+            if (ctx->cc_entries[i].command) free(ctx->cc_entries[i].command);
+            if (ctx->cc_entries[i].file) free(ctx->cc_entries[i].file);
+            if (ctx->cc_entries[i].arguments) {
+                for (int j = 0; j < ctx->cc_entries[i].argc; ++j) {
+                    free(ctx->cc_entries[i].arguments[j]);
+                }
+                free(ctx->cc_entries[i].arguments);
+            }
+        }
+        free(ctx->cc_entries);
+    }
+    ctx->cc_entries = NULL;
+    ctx->cc_count = 0;
+    ctx->cc_cap = 0;
+    ctx->generate_compile_commands = 0;
+
+    // Free job queue and reset build state
+    if (ctx->job_queue) {
+        free(ctx->job_queue);
+    }
+    ctx->job_queue = NULL;
+    ctx->job_capacity = 0;
+    ctx->job_count = 0;
+    ctx->jobs_completed = 0;
+    ctx->build_error = 0;
+
+    // Free flag handlers
+    if (ctx->flag_handlers) {
+        for (int i = 0; i < ctx->flag_count; ++i) {
+            if (ctx->flag_handlers[i].long_name) free(ctx->flag_handlers[i].long_name);
+            if (ctx->flag_handlers[i].help) free(ctx->flag_handlers[i].help);
+            if (ctx->flag_handlers[i].allocated_str) free(ctx->flag_handlers[i].allocated_str);
+        }
+        free(ctx->flag_handlers);
+    }
+    ctx->flag_handlers = NULL;
+    ctx->flag_count = 0;
+    ctx->flag_cap = 0;
+
+    // Reset CLI/run helpers
+    ctx->run_subcmd = NULL;
+    ctx->argv0_for_help = "cbuild";
+
+    // Free and reset global build settings
+    if (ctx->output_dir) {
+        free(ctx->output_dir);
+        ctx->output_dir = NULL;
+    }
+    if (ctx->cc) {
+        free(ctx->cc);
+        ctx->cc = NULL;
+    }
+    if (ctx->ar) {
+        free(ctx->ar);
+        ctx->ar = NULL;
+    }
+    if (ctx->ld) {
+        free(ctx->ld);
+        ctx->ld = NULL;
+    }
+    if (ctx->global_cflags) {
+        for (int i = 0; i < ctx->global_cflag_count; ++i) free(ctx->global_cflags[i]);
+        free(ctx->global_cflags);
+        ctx->global_cflags = NULL;
+    }
+    ctx->global_cflag_count = 0;
+    ctx->global_cflag_cap = 0;
+    if (ctx->global_ldflags) {
+        for (int i = 0; i < ctx->global_ldflag_count; ++i) free(ctx->global_ldflags[i]);
+        free(ctx->global_ldflags);
+        ctx->global_ldflags = NULL;
+    }
+    ctx->global_ldflag_count = 0;
+    ctx->global_ldflag_cap = 0;
+    ctx->parallel_jobs = 0;
+    ctx->cc_kind = CBUILD_CC_GCC_CLANG;
+    ctx->verbose = 0;
+
+    /* Free config mapping */
+    if (ctx->cfg_targets) {
+        free(ctx->cfg_targets);
+        ctx->cfg_targets = NULL;
+    }
+    if (ctx->cfg_values) {
+        free(ctx->cfg_values);
+        ctx->cfg_values = NULL;
+    }
+    ctx->cfg_count = 0;
+    ctx->cfg_cap = 0;
+    ctx->active_config = NULL;
+
+    /* Free all tracked configs (includes default_config if it was created via cbuild_config_new) */
+    if (ctx->all_configs) {
+        for (int i = 0; i < ctx->all_configs_count; ++i) {
+            if (ctx->all_configs[i]) {
+                cbuild_config_free(ctx, ctx->all_configs[i]);
+            }
+        }
+        free(ctx->all_configs);
+        ctx->all_configs = NULL;
+    }
+    ctx->all_configs_count = 0;
+    ctx->all_configs_cap = 0;
+
+    /* Configurations are tracked in all_configs and were released above. */
+    ctx->default_config = NULL;
+
+    // Clear error state
+    ctx->last_error[0] = '\0';
+}
+
+/* Public reset - tears down and reinitializes for reuse */
+void cbuild_reset(cbuild_context_t* ctx) {
+    cbuild_teardown(ctx);
+    // Reinitialize defaults so a fresh graph can be constructed
+    cbuild_init(ctx);
+}
+
+static target_t* cbuild_create_target(cbuild_context_t* ctx, const char* name,
                                       cbuild_target_type type) {
-    target_t *t = (target_t *)calloc(1, sizeof(target_t));
+    target_t* t = (target_t*)calloc(1, sizeof(target_t));
     t->type = type;
     t->name = strdup(name);
-    // Set output file and obj_dir
     char *out = NULL, *obj = NULL;
+    const char *output_dir = ctx->active_config ? (ctx->active_config->output_dir ? ctx->active_config->output_dir : ctx->output_dir) : ctx->output_dir;
     if (type == TARGET_EXECUTABLE) {
 #ifdef _WIN32
-        append_format(&out, "%s/%s.exe", g_output_dir, name);
+        append_format(&out, "%s/%s.exe", output_dir, name);
 #else
-        append_format(&out, "%s/%s", g_output_dir, name);
+        append_format(&out, "%s/%s", output_dir, name);
 #endif
     } else if (type == TARGET_STATIC_LIB) {
 #ifdef _WIN32
-        append_format(&out, "%s/%s.lib", g_output_dir, name);
+        append_format(&out, "%s/%s.lib", output_dir, name);
 #else
-        append_format(&out, "%s/lib%s.a", g_output_dir, name);
+        append_format(&out, "%s/lib%s.a", output_dir, name);
 #endif
     } else if (type == TARGET_SHARED_LIB) {
 #ifdef _WIN32
-        append_format(&out, "%s/%s.dll", g_output_dir, name);
+        append_format(&out, "%s/%s.dll", output_dir, name);
 #elif __APPLE__
-        append_format(&out, "%s/lib%s.dylib", g_output_dir, name);
+        append_format(&out, "%s/lib%s.dylib", output_dir, name);
 #else
-        append_format(&out, "%s/lib%s.so", g_output_dir, name);
+        append_format(&out, "%s/lib%s.so", output_dir, name);
 #endif
     }
-    append_format(&obj, "%s/obj_%s", g_output_dir, name);
+
+    append_format(&obj, "%s/obj_%s", output_dir, name);
     t->output_file = out;
     t->obj_dir = obj;
     t->commands = NULL;
     t->cmd_count = t->cmd_cap = 0;
     t->post_commands = NULL;
     t->post_cmd_count = t->post_cmd_cap = 0;
-    // Add to global list
-    ensure_capacity_charpp((char ***)&g_targets, &g_target_count, &g_target_cap);
-    g_targets[g_target_count++] = t;
+    t->compiler = NULL;
+    t->linker = NULL;
+    t->cc_kind_override = -1;
+    ensure_capacity_charpp(ctx, (char***)&ctx->targets, &ctx->target_count, &ctx->target_cap);
+    ctx->targets[ctx->target_count++] = t;
     return t;
 }
 
-// Remove a file from disk
-static void remove_file(const char *path) {
+/* Comparison functions for sorting to stabilize build results */
+static int cbuild__strcmp_wrapper(const void* a, const void* b) {
+    const char* sa = *(const char**)a;
+    const char* sb = *(const char**)b;
+    return strcmp(sa, sb);
+}
+
+static void remove_file(cbuild_context_t* ctx, const char* path) {
+    (void)ctx;
     if (!path || !*path)
         return;
     remove(path);
 }
 
-// Recursively remove a directory and its contents
-static void remove_dir_recursive(const char *path) {
+static void remove_dir_recursive(cbuild_context_t* ctx, const char* path) {
     if (!path || !*path)
         return;
 #ifdef _WIN32
@@ -2540,18 +5380,18 @@ static void remove_dir_recursive(const char *path) {
         char full[MAX_PATH];
         snprintf(full, sizeof(full), "%s\\%s", path, ffd.cFileName);
         if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            remove_dir_recursive(full);
+            remove_dir_recursive(ctx, full);
         } else {
-            remove_file(full);
+            remove_file(ctx, full);
         }
     } while (FindNextFile(hFind, &ffd));
     FindClose(hFind);
     _rmdir(path);
 #else
-    DIR *dir = opendir(path);
+    DIR* dir = opendir(path);
     if (!dir)
         return;
-    struct dirent *entry;
+    struct dirent* entry;
     char buf[1024];
     while ((entry = readdir(dir))) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
@@ -2560,9 +5400,9 @@ static void remove_dir_recursive(const char *path) {
         struct stat st;
         if (!stat(buf, &st)) {
             if (S_ISDIR(st.st_mode)) {
-                remove_dir_recursive(buf);
+                remove_dir_recursive(ctx, buf);
             } else {
-                remove_file(buf);
+                remove_file(ctx, buf);
             }
         }
     }
@@ -2571,41 +5411,86 @@ static void remove_dir_recursive(const char *path) {
 #endif
 }
 
-// Build a target (compile sources, link, etc.)
-static void build_target(target_t *t, int *error_flag) {
-    // Compile all sources to objects
-    int obj_count = t->sources_count;
-    char **obj_files = (char **)calloc(obj_count, sizeof(char *));
-    for (int i = 0; i < obj_count; ++i) {
-        const char *src = t->sources[i];
-        const char *slash = strrchr(src, '/');
-        const char *base = slash ? slash + 1 : src;
-        char *dot = strrchr(base, '.');
-        size_t len = dot ? (size_t)(dot - base) : strlen(base);
-        char objname[512];
-        snprintf(objname, sizeof(objname), "%s/%.*s.o", t->obj_dir, (int)len, base);
-        obj_files[i] = strdup(objname);
-
-        char depname[512];
-        snprintf(depname, sizeof(depname), "%s/%.*s.o.d", t->obj_dir, (int)len,
-                 base);
-
-        if (need_recompile(src, objname, depname)) {
-            cbuild_pretty_step("COMPILE", CBUILD_COLOR_BLUE, "%s", src);
-            if (compile_source(src, objname, depname, t) != 0) {
-                *error_flag = 1;
-                goto cleanup;
-            }
+static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
+    if (t->external) {
+        if (!cbuild_file_exists(t->output_file)) {
+            cbuild__log_status(ctx, 0, "Subproject output '%s' was not produced", t->output_file);
+            *error_flag = 1;
         }
+        return;
     }
 
-    // Link if needed
+    /* Compute and apply effective build configuration (defaults → active → target) */
+    cbuild__apply_config_if_needed(ctx, t);
+
+    /* Use target's cc_kind_override if set, otherwise fall back to context */
+    cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
+
+    if (t->type == TARGET_DUMMY) {
+        cbuild__log_step(ctx, "DUMMY", CBUILD_COLOR_MAGENTA, "%s", t->name);
+        return;
+    }
+
+    if (t->type == TARGET_FILE_DEP) {
+        int should_update = 0;
+        struct stat st_out;
+        time_t out_mtime = 0;
+
+        if (stat(t->output_file, &st_out) != 0) {
+            should_update = 1;  // output missing
+        } else {
+            out_mtime = st_out.st_mtime;
+            for (int i = 0; i < t->sources_count; ++i) {
+                struct stat st_src;
+                if (stat(t->sources[i], &st_src) == 0 &&
+                    st_src.st_mtime > out_mtime) {
+                    should_update = 1;  // source newer than output
+                    break;
+                }
+            }
+        }
+
+        if (should_update) {
+            for (int i = 0; i < t->cmd_count; ++i) {
+                if (cbuild_run_command(ctx, t->commands[i]) != 0) {
+                    *error_flag = 1;
+                    return;
+                }
+            }
+            if (!cbuild_file_exists(t->output_file)) {
+                cbuild__log_status(ctx, 0, "Required file '%s' missing after commands in target '%s'", t->output_file, t->name);
+                *error_flag = 1;
+                return;
+            }
+            cbuild__log_step(ctx, "FILE_DEP", CBUILD_COLOR_GREEN, "%s (updated)", t->output_file);
+        }
+        return;
+    }
+
+    process_compile_jobs_parallel(ctx, t, error_flag);
+    if (*error_flag) return;
+
+    int obj_count = t->sources_count;
+    char** obj_files = (char**)calloc(obj_count, sizeof(char*));
+    for (int i = 0; i < obj_count; ++i) {
+        const char* src = t->sources[i];
+        const char* slash = strrchr(src, '/');
+        const char* bslash = strrchr(src, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        const char* base = slash ? slash + 1 : src;
+        char* dot = strrchr(base, '.');
+        size_t len = dot ? (size_t)(dot - base) : strlen(base);
+        unsigned h = cbuild__hash_path(src);
+        char objname[512];
+        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
+        obj_files[i] = strdup(objname);
+    }
+
     int needs_link = 0;
     struct stat st_out;
     if (stat(t->output_file, &st_out) != 0) {
         needs_link = 1;
     } else {
-        // Check if any object file is newer than the output
         for (int i = 0; i < obj_count; ++i) {
             struct stat st_obj;
             if (stat(obj_files[i], &st_obj) != 0 ||
@@ -2614,10 +5499,9 @@ static void build_target(target_t *t, int *error_flag) {
                 break;
             }
         }
-        // Check if any dependency output is newer than the output
         if (!needs_link) {
             for (int i = 0; i < t->dep_count; ++i) {
-                target_t *dep = t->dependencies[i];
+                target_t* dep = t->dependencies[i];
                 if (dep->output_file) {
                     struct stat st_dep;
                     if (stat(dep->output_file, &st_dep) == 0) {
@@ -2630,67 +5514,532 @@ static void build_target(target_t *t, int *error_flag) {
             }
         }
     }
-    if (needs_link) {
-        cbuild_pretty_step("LINK", CBUILD_COLOR_YELLOW, "%s", t->output_file);
-        char *cmd = NULL;
+
+    /* If timestamps say "up-to-date", also verify the link command signature */
+    if (!needs_link) {
+        char* link_sig = NULL;
+        cbuild_argv_t largv;
+        cbuild_argv_init(&largv);
+
+        const char* ld = cbuild_target_linker(ctx, t);
         if (t->type == TARGET_STATIC_LIB) {
-#ifdef _WIN32
-            append_format(&cmd, "%s /OUT:%s", g_ar, t->output_file);
-            for (int i = 0; i < obj_count; ++i)
-                append_format(&cmd, " %s", obj_files[i]);
-#else
-            append_format(&cmd, "%s rcs %s", g_ar, t->output_file);
-            for (int i = 0; i < obj_count; ++i)
-                append_format(&cmd, " %s", obj_files[i]);
-#endif
-        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-            append_format(&cmd, "%s -o %s", g_ld, t->output_file);
-            for (int i = 0; i < obj_count; ++i)
-                append_format(&cmd, " %s", obj_files[i]);
-            for (int i = 0; i < t->lib_dir_count; ++i)
-#ifdef _WIN32
-                append_format(&cmd, " /LIBPATH:\"%s\"", t->lib_dirs[i]);
-#else
-                append_format(&cmd, " -L\"%s\"", t->lib_dirs[i]);
-#endif
-            for (int i = 0; i < t->link_lib_count; ++i)
-#ifdef _WIN32
-                append_format(&cmd, " %s.lib", t->link_libs[i]);
-#elif __APPLE__
-                append_format(&cmd, " -l%s.dylib", t->link_libs[i]);
-#else
-                    append_format(&cmd, " -l%s", t->link_libs[i]);
-#endif
-            for (int i = 0; i < t->dep_count; ++i) {
-                target_t *dep = t->dependencies[i];
-                if (dep->type == TARGET_STATIC_LIB || dep->type == TARGET_SHARED_LIB)
-                    append_format(&cmd, " %s", dep->output_file);
+            cbuild_argv_append(&largv, ctx->ar);
+            if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
+                char out_arg[1024];
+                snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
+                cbuild_argv_append(&largv, out_arg);
+            } else {
+                cbuild_argv_append(&largv, "rcs");
+                cbuild_argv_append(&largv, t->output_file);
             }
-            if (t->ldflags)
-                append_format(&cmd, " %s", t->ldflags);
-            if (g_global_ldflags)
-                append_format(&cmd, " %s", g_global_ldflags);
-            if (t->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                append_format(&cmd, " /DLL");
-#else
-                append_format(&cmd, " -shared");
+            char** tmp_objs = (char**)malloc(sizeof(char*) * obj_count);
+            for (int i = 0; i < obj_count; ++i) tmp_objs[i] = obj_files[i];
+            qsort(tmp_objs, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
+            for (int i = 0; i < obj_count; ++i) cbuild_argv_append(&largv, tmp_objs[i]);
+            free(tmp_objs);
+        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
+            cbuild_argv_append(&largv, ld);
+            if (cc_kind == CBUILD_CC_MSVC) {
+                cbuild_argv_append(&largv, "/nologo");
+                char fe_arg[1024];
+                snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
+                cbuild_argv_append(&largv, fe_arg);
+            } else {
+                cbuild_argv_append(&largv, "-o");
+                cbuild_argv_append(&largv, t->output_file);
+            }
+
+            char** tmp_objs = (char**)malloc(sizeof(char*) * obj_count);
+            for (int i = 0; i < obj_count; ++i) tmp_objs[i] = obj_files[i];
+            qsort(tmp_objs, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
+            for (int i = 0; i < obj_count; ++i) cbuild_argv_append(&largv, tmp_objs[i]);
+            free(tmp_objs);
+
+            if (t->lib_dir_count > 0) {
+                char** tmp = (char**)malloc(sizeof(char*) * t->lib_dir_count);
+                for (int i = 0; i < t->lib_dir_count; ++i) tmp[i] = t->lib_dirs[i];
+                qsort(tmp, t->lib_dir_count, sizeof(char*), cbuild__strcmp_wrapper);
+                for (int i = 0; i < t->lib_dir_count; ++i) {
+                    char lib_arg[1024];
+                    if (cc_kind == CBUILD_CC_MSVC) {
+                        snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", tmp[i]);
+                    } else {
+                        snprintf(lib_arg, sizeof(lib_arg), "-L%s", tmp[i]);
+                    }
+                    cbuild_argv_append(&largv, lib_arg);
+                }
+                free(tmp);
+            }
+
+            if (t->exposed_lib_count > 0) {
+                if (cc_kind != CBUILD_CC_MSVC) {
+#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
+                    cbuild_argv_append(&largv, "-Wl,-E");
 #endif
+                }
+            }
+
+            if (t->exposed_lib_count > 0) {
+                char** tmp = (char**)malloc(sizeof(char*) * t->exposed_lib_count);
+                for (int i = 0; i < t->exposed_lib_count; ++i) tmp[i] = t->exposed_libs[i];
+                qsort(tmp, t->exposed_lib_count, sizeof(char*), cbuild__strcmp_wrapper);
+                for (int i = 0; i < t->exposed_lib_count; ++i) {
+                    cbuild_argv_append(&largv, tmp[i]);
+                }
+                free(tmp);
+            }
+
+            if (t->link_lib_count > 0) {
+                for (int i = 0; i < t->link_lib_count; ++i) {
+                    const char* lib = t->link_libs[i];
+                    if (cc_kind == CBUILD_CC_MSVC) {
+                        if (strchr(lib, '\\') || strchr(lib, ':')) {
+                            cbuild_argv_append(&largv, lib);
+                        } else {
+                            char lib_arg[512];
+                            snprintf(lib_arg, sizeof(lib_arg), "%s.lib", lib);
+                            cbuild_argv_append(&largv, lib_arg);
+                        }
+                    } else {
+                        if (strchr(lib, '/')) {
+                            cbuild_argv_append(&largv, lib);
+                        } else {
+                            char lib_arg[512];
+                            snprintf(lib_arg, sizeof(lib_arg), "-l%s", lib);
+                            cbuild_argv_append(&largv, lib_arg);
+                        }
+                    }
+                }
+            }
+
+            if (t->dep_count > 0) {
+                for (int i = 0; i < t->dep_count; ++i) {
+                    target_t* dep = t->dependencies[i];
+                    if (dep->type == TARGET_STATIC_LIB) {
+                        cbuild_argv_append(&largv, dep->output_file);
+                    } else if (dep->type == TARGET_SHARED_LIB) {
+#ifdef _WIN32
+                        /* On Windows, link against .lib import library, not .dll */
+                        char lib_path[1024];
+                        strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
+                        lib_path[sizeof(lib_path) - 1] = '\0';
+                        size_t len = strlen(lib_path);
+                        if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
+                            strcpy(lib_path + len - 4, ".lib");
+                        }
+                        cbuild_argv_append(&largv, lib_path);
+#else
+                        cbuild_argv_append(&largv, dep->output_file);
+#endif
+                    } else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
+                               cbuild__is_library_path(dep->output_file)) {
+                        cbuild_argv_append(&largv, dep->output_file);
+                    }
+                }
+            }
+
+            for (int i = 0; i < t->ldflag_count; ++i)
+                cbuild_argv_append(&largv, t->ldflags[i]);
+            for (int i = 0; i < ctx->global_ldflag_count; ++i)
+                cbuild_argv_append(&largv, ctx->global_ldflags[i]);
+
+            if (t->type == TARGET_SHARED_LIB) {
+                if (cc_kind == CBUILD_CC_MSVC) {
+                    cbuild_argv_append(&largv, "/LD");
+                } else {
+#ifdef __APPLE__
+                    cbuild_argv_append(&largv, "-dynamiclib");
+                    if (t->soname) {
+                        char soname_arg[1024];
+                        snprintf(soname_arg, sizeof(soname_arg), "-install_name");
+                        cbuild_argv_append(&largv, soname_arg);
+                        snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
+                        cbuild_argv_append(&largv, soname_arg);
+                    }
+#else
+                    cbuild_argv_append(&largv, "-shared");
+                    if (t->soname) {
+                        char soname_arg[1024];
+                        snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
+                        cbuild_argv_append(&largv, soname_arg);
+                    }
+#endif
+                }
             }
         }
+
+        for (int i = 0; i < largv.count; ++i) {
+            append_format(&link_sig, "%s\n", largv.args[i]);
+        }
+        const char* ev = getenv("LDFLAGS");
+        if (ev) append_format(&link_sig, "ENV:LDFLAGS=%s\n", ev);
+
+        cbuild_argv_free(&largv);
+
+        char link_sig_path[1024];
+        snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
+
+        int link_sig_mismatch = 0;
+        FILE* lf = fopen(link_sig_path, "rb");
+        if (!lf) {
+            link_sig_mismatch = 1;
+        } else {
+            fseek(lf, 0, SEEK_END);
+            long lsz = ftell(lf);
+            fseek(lf, 0, SEEK_SET);
+            char* prev = (char*)malloc((size_t)lsz + 1);
+            if (!prev) {
+                link_sig_mismatch = 1;
+            } else {
+                size_t rd = fread(prev, 1, (size_t)lsz, lf);
+                prev[rd] = '\0';
+                if (strcmp(prev, link_sig ? link_sig : "") != 0) {
+                    link_sig_mismatch = 1;
+                }
+                free(prev);
+            }
+            fclose(lf);
+        }
+        if (link_sig) free(link_sig);
+        if (link_sig_mismatch) {
+            needs_link = 1;
+        }
+    }
+    if (needs_link) {
+        char output_dir[1024];
+        get_dir_from_path(t->output_file, output_dir, sizeof(output_dir));
+        ensure_dir_exists(output_dir);
+
+        cbuild__log_step(ctx, "LINK", CBUILD_COLOR_YELLOW, "%s", t->output_file);
+
+        /* Build argv for linking */
+        cbuild_argv_t argv;
+        cbuild_argv_init(&argv);
+
+        const char* ld = cbuild_target_linker(ctx, t);
+        if (t->type == TARGET_STATIC_LIB) {
+            /* Use append_flags to handle archivers with spaces (e.g., "zig ar") */
+            cbuild_argv_append_flags(&argv, ctx->ar);
+            if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
+                char out_arg[1024];
+                snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
+                cbuild_argv_append(&argv, out_arg);
+            } else {
+                cbuild_argv_append(&argv, "rcs");
+                cbuild_argv_append(&argv, t->output_file);
+            }
+            /* Sort object files to stabilize build results */
+            qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
+            for (int i = 0; i < obj_count; ++i)
+                cbuild_argv_append(&argv, obj_files[i]);
+
+        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
+            /* Use append_flags to handle linkers with spaces (e.g., "zig cc -target ...") */
+            cbuild_argv_append_flags(&argv, ld);
+
+            if (cc_kind == CBUILD_CC_MSVC) {
+                cbuild_argv_append(&argv, "/nologo");
+                char fe_arg[1024];
+                snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
+                cbuild_argv_append(&argv, fe_arg);
+            } else {
+                cbuild_argv_append(&argv, "-o");
+                cbuild_argv_append(&argv, t->output_file);
+            }
+
+            /* Sort object files to stabilize build results */
+            qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
+            for (int i = 0; i < obj_count; ++i)
+                cbuild_argv_append(&argv, obj_files[i]);
+
+            /* Sort library directories to stabilize build results */
+            if (t->lib_dir_count > 0)
+                qsort(t->lib_dirs, t->lib_dir_count, sizeof(char*), cbuild__strcmp_wrapper);
+            for (int i = 0; i < t->lib_dir_count; ++i) {
+                char lib_arg[1024];
+                if (cc_kind == CBUILD_CC_MSVC) {
+                    snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", t->lib_dirs[i]);
+                } else {
+                    snprintf(lib_arg, sizeof(lib_arg), "-L%s", t->lib_dirs[i]);
+                }
+                cbuild_argv_append(&argv, lib_arg);
+            }
+
+            if (t->exposed_lib_count > 0) {
+                // Export dynamic symbols for plugin/dlopen use
+                if (cc_kind != CBUILD_CC_MSVC) {
+#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
+                    cbuild_argv_append(&argv, "-Wl,-E");
+#endif
+                }
+            }
+
+            /* Sort exposed libraries to stabilize build results */
+            if (t->exposed_lib_count > 0)
+                qsort(t->exposed_libs, t->exposed_lib_count, sizeof(char*), cbuild__strcmp_wrapper);
+            for (int i = 0; i < t->exposed_lib_count; ++i) {
+                cbuild_argv_append(&argv, t->exposed_libs[i]);
+            }
+
+            for (int i = 0; i < t->link_lib_count; ++i) {
+                if (cc_kind == CBUILD_CC_MSVC) {
+                    /* Skip 'm' (math) library on MSVC - it's part of the CRT */
+                    if (strcmp(t->link_libs[i], "m") == 0) continue;
+                    if (strchr(t->link_libs[i], '\\') || strchr(t->link_libs[i], ':')) {
+                        cbuild_argv_append(&argv, t->link_libs[i]);
+                    } else {
+                        char lib_arg[512];
+                        snprintf(lib_arg, sizeof(lib_arg), "%s.lib", t->link_libs[i]);
+                        cbuild_argv_append(&argv, lib_arg);
+                    }
+                } else {
+                    if (strchr(t->link_libs[i], '/')) {
+                        cbuild_argv_append(&argv, t->link_libs[i]);
+                    } else {
+                        char lib_arg[512];
+                        snprintf(lib_arg, sizeof(lib_arg), "-l%s", t->link_libs[i]);
+                        cbuild_argv_append(&argv, lib_arg);
+                    }
+                }
+            }
+
+            for (int i = 0; i < t->dep_count; ++i) {
+                target_t* dep = t->dependencies[i];
+                if (dep->type == TARGET_STATIC_LIB) {
+                    cbuild_argv_append(&argv, dep->output_file);
+                } else if (dep->type == TARGET_SHARED_LIB) {
+#ifdef _WIN32
+                    /* On Windows, link against .lib import library, not .dll */
+                    char lib_path[1024];
+                    strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
+                    lib_path[sizeof(lib_path) - 1] = '\0';
+                    size_t len = strlen(lib_path);
+                    if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
+                        strcpy(lib_path + len - 4, ".lib");
+                    }
+                    cbuild_argv_append(&argv, lib_path);
+#else
+                    cbuild_argv_append(&argv, dep->output_file);
+#endif
+                }
+                // FILE_DEP is linkable iff its output looks like a library path.
+                else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
+                         cbuild__is_library_path(dep->output_file)) {
+                    cbuild_argv_append(&argv, dep->output_file);
+                }
+            }
+
+            for (int i = 0; i < t->ldflag_count; ++i)
+                cbuild_argv_append(&argv, t->ldflags[i]);
+            for (int i = 0; i < ctx->global_ldflag_count; ++i)
+                cbuild_argv_append(&argv, ctx->global_ldflags[i]);
+
+            if (t->type == TARGET_SHARED_LIB) {
+                if (cc_kind == CBUILD_CC_MSVC) {
+                    cbuild_argv_append(&argv, "/LD");
+                } else {
+#ifdef __APPLE__
+                    cbuild_argv_append(&argv, "-dynamiclib");
+                    if (t->soname) {
+                        char soname_arg[1024];
+                        snprintf(soname_arg, sizeof(soname_arg), "-install_name");
+                        cbuild_argv_append(&argv, soname_arg);
+                        snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
+                        cbuild_argv_append(&argv, soname_arg);
+                    }
+#else
+                    cbuild_argv_append(&argv, "-shared");
+                    if (t->soname) {
+                        char soname_arg[1024];
+                        snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
+                        cbuild_argv_append(&argv, soname_arg);
+                    }
+#endif
+                }
+            }
+        }
+
+        // Print command in verbose mode before executing
+        if (ctx->verbose) {
+            char cmd_buf[4096];
+            int bpos = 0;
+            for (int i = 0; i < argv.count && bpos < (int)sizeof(cmd_buf) - 1; ++i) {
+                if (i > 0) cmd_buf[bpos++] = ' ';
+                if (strchr(argv.args[i], ' ')) {
+                    bpos += snprintf(cmd_buf + bpos, sizeof(cmd_buf) - bpos, "'%s'", argv.args[i]);
+                } else {
+                    bpos += snprintf(cmd_buf + bpos, sizeof(cmd_buf) - bpos, "%s", argv.args[i]);
+                }
+            }
+            cmd_buf[bpos] = '\0';
+            cbuild__log(ctx, CBUILD_LOG_VERBOSE, "%s", cmd_buf);
+        }
+
         int rc;
-        char *output = NULL;
-        rc = run_command(cmd, 1, &output);
+        char* output = NULL;
+        rc = cbuild_spawn_process(ctx, &argv, 1, &output);
+        cbuild_argv_free(&argv);
+
         if (output && rc != 0) {
             fwrite(output, 1, strlen(output), stderr);
         }
         if (output)
             free(output);
-        free(cmd);
+
         if (rc != 0) {
-            cbuild_pretty_status(0, "Linking failed for %s", t->output_file);
+            cbuild__log_status(ctx, 0, "Linking failed for %s", t->output_file);
             *error_flag = 1;
             goto cleanup;
+        } else {
+            /* On successful link, write signature of the link command */
+            char* link_sig = NULL;
+            cbuild_argv_t largv;
+            cbuild_argv_init(&largv);
+
+            const char* ld2 = cbuild_target_linker(ctx, t);
+            if (t->type == TARGET_STATIC_LIB) {
+                cbuild_argv_append(&largv, ctx->ar);
+                if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
+                    char out_arg[1024];
+                    snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
+                    cbuild_argv_append(&largv, out_arg);
+                } else {
+                    cbuild_argv_append(&largv, "rcs");
+                    cbuild_argv_append(&largv, t->output_file);
+                }
+                /* object files were already sorted before linking */
+                for (int i = 0; i < obj_count; ++i)
+                    cbuild_argv_append(&largv, obj_files[i]);
+
+            } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
+                cbuild_argv_append(&largv, ld2);
+
+                if (cc_kind == CBUILD_CC_MSVC) {
+                    cbuild_argv_append(&largv, "/nologo");
+                    char fe_arg[1024];
+                    snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
+                    cbuild_argv_append(&largv, fe_arg);
+                } else {
+                    cbuild_argv_append(&largv, "-o");
+                    cbuild_argv_append(&largv, t->output_file);
+                }
+
+                for (int i = 0; i < obj_count; ++i)
+                    cbuild_argv_append(&largv, obj_files[i]);
+
+                for (int i = 0; i < t->lib_dir_count; ++i) {
+                    char lib_arg[1024];
+                    if (cc_kind == CBUILD_CC_MSVC) {
+                        snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", t->lib_dirs[i]);
+                    } else {
+                        snprintf(lib_arg, sizeof(lib_arg), "-L%s", t->lib_dirs[i]);
+                    }
+                    cbuild_argv_append(&largv, lib_arg);
+                }
+
+                if (t->exposed_lib_count > 0) {
+                    if (cc_kind != CBUILD_CC_MSVC) {
+#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
+                        cbuild_argv_append(&largv, "-Wl,-E");
+#endif
+                    }
+                }
+
+                for (int i = 0; i < t->exposed_lib_count; ++i) {
+                    cbuild_argv_append(&largv, t->exposed_libs[i]);
+                }
+
+                for (int i = 0; i < t->link_lib_count; ++i) {
+                    if (cc_kind == CBUILD_CC_MSVC) {
+                        /* Skip 'm' (math) library on MSVC - it's part of the CRT */
+                        if (strcmp(t->link_libs[i], "m") == 0) continue;
+                        if (strchr(t->link_libs[i], '\\') || strchr(t->link_libs[i], ':')) {
+                            cbuild_argv_append(&largv, t->link_libs[i]);
+                        } else {
+                            char lib_arg[512];
+                            snprintf(lib_arg, sizeof(lib_arg), "%s.lib", t->link_libs[i]);
+                            cbuild_argv_append(&largv, lib_arg);
+                        }
+                    } else {
+                        if (strchr(t->link_libs[i], '/')) {
+                            cbuild_argv_append(&largv, t->link_libs[i]);
+                        } else {
+                            char lib_arg[512];
+                            snprintf(lib_arg, sizeof(lib_arg), "-l%s", t->link_libs[i]);
+                            cbuild_argv_append(&largv, lib_arg);
+                        }
+                    }
+                }
+
+                for (int i = 0; i < t->dep_count; ++i) {
+                    target_t* dep = t->dependencies[i];
+                    if (dep->type == TARGET_STATIC_LIB) {
+                        cbuild_argv_append(&largv, dep->output_file);
+                    } else if (dep->type == TARGET_SHARED_LIB) {
+#ifdef _WIN32
+                        /* On Windows, link against .lib import library, not .dll */
+                        char lib_path[1024];
+                        strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
+                        lib_path[sizeof(lib_path) - 1] = '\0';
+                        size_t len = strlen(lib_path);
+                        if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
+                            strcpy(lib_path + len - 4, ".lib");
+                        }
+                        cbuild_argv_append(&largv, lib_path);
+#else
+                        cbuild_argv_append(&largv, dep->output_file);
+#endif
+                    } else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
+                               cbuild__is_library_path(dep->output_file)) {
+                        cbuild_argv_append(&largv, dep->output_file);
+                    }
+                }
+
+                for (int i = 0; i < t->ldflag_count; ++i)
+                    cbuild_argv_append(&largv, t->ldflags[i]);
+                for (int i = 0; i < ctx->global_ldflag_count; ++i)
+                    cbuild_argv_append(&largv, ctx->global_ldflags[i]);
+
+                if (t->type == TARGET_SHARED_LIB) {
+                    if (cc_kind == CBUILD_CC_MSVC) {
+                        cbuild_argv_append(&largv, "/LD");
+                    } else {
+#ifdef __APPLE__
+                        cbuild_argv_append(&largv, "-dynamiclib");
+                        if (t->soname) {
+                            char soname_arg[1024];
+                            snprintf(soname_arg, sizeof(soname_arg), "-install_name");
+                            cbuild_argv_append(&largv, soname_arg);
+                            snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
+                            cbuild_argv_append(&largv, soname_arg);
+                        }
+#else
+                        cbuild_argv_append(&largv, "-shared");
+                        if (t->soname) {
+                            char soname_arg[1024];
+                            snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
+                            cbuild_argv_append(&largv, soname_arg);
+                        }
+#endif
+                    }
+                }
+            }
+
+            for (int i = 0; i < largv.count; ++i) {
+                append_format(&link_sig, "%s\n", largv.args[i]);
+            }
+            const char* lev = getenv("LDFLAGS");
+            if (lev) append_format(&link_sig, "ENV:LDFLAGS=%s\n", lev);
+
+            char link_sig_path[1024];
+            snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
+            FILE* lf = fopen(link_sig_path, "wb");
+            if (lf) {
+                fwrite(link_sig ? link_sig : "", 1, link_sig ? strlen(link_sig) : 0, lf);
+                fclose(lf);
+            }
+            if (link_sig) free(link_sig);
+            cbuild_argv_free(&largv);
         }
     }
 
@@ -2698,6 +6047,381 @@ cleanup:
     for (int i = 0; i < obj_count; ++i)
         free(obj_files[i]);
     free(obj_files);
+}
+
+/* ---------------- Build Configuration API (implementation) ---------------- */
+
+static void cbuild__config_add_tokens(cbuild_context_t* ctx, char*** arr, int* count, int* cap, const char* flags) {
+    if (!flags || !*flags) return;
+    char* copy = strdup(flags);
+    if (!copy) return;
+
+    char* p = copy;
+    while (*p) {
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (!*p) break;
+
+        char* start = p;
+        int in_quote = 0;
+        while (*p) {
+            if (*p == '"') {
+                in_quote = !in_quote;
+                p++;
+            } else if (!in_quote && (*p == ' ' || *p == '\t'))
+                break;
+            else
+                p++;
+        }
+        if (p > start) {
+            char saved = *p;
+            *p = '\0';
+
+            char* token = start;
+            size_t len = strlen(token);
+            if (len >= 2 && token[0] == '"' && token[len - 1] == '"') {
+                token[len - 1] = '\0';
+                token++;
+            }
+
+            ensure_capacity_charpp(ctx, arr, count, cap);
+            (*arr)[(*count)++] = strdup(token);
+
+            *p = saved;
+        }
+    }
+    free(copy);
+}
+
+config_t* cbuild_config_new(cbuild_context_t* ctx, const char* name) {
+    config_t* c = (config_t*)calloc(1, sizeof(config_t));
+    if (!c) return NULL;
+    c->name = name ? strdup(name) : NULL;
+
+    /* Track this config in the context for automatic cleanup */
+    if (ctx) {
+        if (ctx->all_configs_count >= ctx->all_configs_cap) {
+            int newcap = ctx->all_configs_cap ? ctx->all_configs_cap * 2 : 4;
+            config_t** newarr = (config_t**)realloc(ctx->all_configs, newcap * sizeof(config_t*));
+            if (newarr) {
+                ctx->all_configs = newarr;
+                ctx->all_configs_cap = newcap;
+            }
+        }
+        if (ctx->all_configs_count < ctx->all_configs_cap) {
+            ctx->all_configs[ctx->all_configs_count++] = c;
+        }
+    }
+    c->cflags = NULL;
+    c->ncflags = 0;
+    c->cflags_cap = 0;
+    c->ldflags = NULL;
+    c->nldflags = 0;
+    c->ldflags_cap = 0;
+    c->defines = NULL;
+    c->ndefines = 0;
+    c->defines_cap = 0;
+    c->includes = NULL;
+    c->nincludes = 0;
+    c->includes_cap = 0;
+    c->libdirs = NULL;
+    c->nlibdirs = 0;
+    c->libdirs_cap = 0;
+    c->linklibs = NULL;
+    c->nlinklibs = 0;
+    c->linklibs_cap = 0;
+
+    c->opt_level = -1;
+    c->debug_symbols = -1;
+    c->lto = -1;
+    c->pic = -1;
+    c->warnings = -1;
+    c->output_dir = NULL;
+    c->std = NULL;
+    c->runtime = NULL;
+    c->sanitize = 0;
+    c->compiler = NULL;
+    c->linker = NULL;
+    return c;
+}
+
+void cbuild_config_free(cbuild_context_t* ctx, config_t* c) {
+    if (!c) return;
+
+    /* Remove from tracking array if present */
+    if (ctx && ctx->all_configs) {
+        for (int i = 0; i < ctx->all_configs_count; ++i) {
+            if (ctx->all_configs[i] == c) {
+                ctx->all_configs[i] = NULL;
+                break;
+            }
+        }
+    }
+    if (c->cflags) {
+        for (int i = 0; i < c->ncflags; ++i) free(c->cflags[i]);
+        free(c->cflags);
+    }
+    if (c->ldflags) {
+        for (int i = 0; i < c->nldflags; ++i) free(c->ldflags[i]);
+        free(c->ldflags);
+    }
+    if (c->defines) {
+        for (int i = 0; i < c->ndefines; ++i) free(c->defines[i]);
+        free(c->defines);
+    }
+    if (c->includes) {
+        for (int i = 0; i < c->nincludes; ++i) free(c->includes[i]);
+        free(c->includes);
+    }
+    if (c->libdirs) {
+        for (int i = 0; i < c->nlibdirs; ++i) free(c->libdirs[i]);
+        free(c->libdirs);
+    }
+    if (c->linklibs) {
+        for (int i = 0; i < c->nlinklibs; ++i) free(c->linklibs[i]);
+        free(c->linklibs);
+    }
+    if (c->name) free((void*)c->name);
+    if (c->output_dir) free((void*)c->output_dir);
+    if (c->std) free((void*)c->std);
+    if (c->runtime) free((void*)c->runtime);
+    if (c->compiler) free((void*)c->compiler);
+    if (c->linker) free((void*)c->linker);
+    free(c);
+}
+
+void cbuild_config_add_cflags(cbuild_context_t* ctx, config_t* c, const char* flags) {
+    if (!c) return;
+    cbuild__config_add_tokens(ctx, &c->cflags, &c->ncflags, &c->cflags_cap, flags);
+}
+
+void cbuild_config_add_ldflags(cbuild_context_t* ctx, config_t* c, const char* flags) {
+    if (!c) return;
+    cbuild__config_add_tokens(ctx, &c->ldflags, &c->nldflags, &c->ldflags_cap, flags);
+}
+
+void cbuild_config_add_define(cbuild_context_t* ctx, config_t* c, const char* def) {
+    (void)ctx;
+    if (!c || !def) return;
+    ensure_capacity_charpp(ctx, &c->defines, &c->ndefines, &c->defines_cap);
+    c->defines[c->ndefines++] = strdup(def);
+}
+
+void cbuild_config_add_include(cbuild_context_t* ctx, config_t* c, const char* dir) {
+    (void)ctx;
+    if (!c || !dir) return;
+    ensure_capacity_charpp(ctx, &c->includes, &c->nincludes, &c->includes_cap);
+    /* Normalize path separators for consistent path handling on Windows */
+    c->includes[c->nincludes++] = cbuild__normalize_path(dir);
+}
+
+void cbuild_config_add_libdir(cbuild_context_t* ctx, config_t* c, const char* dir) {
+    (void)ctx;
+    if (!c || !dir) return;
+    ensure_capacity_charpp(ctx, &c->libdirs, &c->nlibdirs, &c->libdirs_cap);
+    /* Normalize path separators for consistent path handling on Windows */
+    c->libdirs[c->nlibdirs++] = cbuild__normalize_path(dir);
+}
+
+void cbuild_config_add_linklib(cbuild_context_t* ctx, config_t* c, const char* lib) {
+    (void)ctx;
+    if (!c || !lib) return;
+    ensure_capacity_charpp(ctx, &c->linklibs, &c->nlinklibs, &c->linklibs_cap);
+    /* Normalize path separators for consistent path handling on Windows */
+    c->linklibs[c->nlinklibs++] = cbuild__normalize_path(lib);
+}
+
+void cbuild_config_set_opt(cbuild_context_t* ctx, config_t* c, int level) {
+    (void)ctx;
+    if (!c) return;
+    c->opt_level = level;
+}
+
+void cbuild_config_set_debug(cbuild_context_t* ctx, config_t* c, int on) {
+    (void)ctx;
+    if (!c) return;
+    c->debug_symbols = on ? 1 : 0;
+}
+
+void cbuild_config_set_lto(cbuild_context_t* ctx, config_t* c, int mode) {
+    (void)ctx;
+    if (!c) return;
+    c->lto = mode;
+}
+
+void cbuild_config_set_pic(cbuild_context_t* ctx, config_t* c, int on) {
+    (void)ctx;
+    if (!c) return;
+    c->pic = on ? 1 : 0;
+}
+
+void cbuild_config_set_warnings(cbuild_context_t* ctx, config_t* c, int mode) {
+    (void)ctx;
+    if (!c) return;
+    c->warnings = mode;
+}
+
+void cbuild_config_set_std(cbuild_context_t* ctx, config_t* c, const char* std) {
+    (void)ctx;
+    if (!c) return;
+    if (c->std) {
+        free((void*)c->std);
+        c->std = NULL;
+    }
+    c->std = std ? strdup(std) : NULL;
+}
+
+void cbuild_config_set_runtime(cbuild_context_t* ctx, config_t* c, const char* runtime) {
+    (void)ctx;
+    if (!c) return;
+    if (c->runtime) {
+        free((void*)c->runtime);
+        c->runtime = NULL;
+    }
+    c->runtime = runtime ? strdup(runtime) : NULL;
+}
+
+void cbuild_config_set_output_dir(cbuild_context_t* ctx, config_t* c, const char* output_dir) {
+    (void)ctx;
+    if (!c) return;
+    if (c->output_dir) {
+        free((void*)c->output_dir);
+        c->output_dir = NULL;
+    }
+    /* Normalize path separators for consistent path handling on Windows */
+    c->output_dir = output_dir ? cbuild__normalize_path(output_dir) : NULL;
+}
+
+void cbuild_config_enable_sanitizers(cbuild_context_t* ctx, config_t* c, int mask) {
+    (void)ctx;
+    if (!c) return;
+    c->sanitize |= mask;
+}
+
+void cbuild_config_disable_sanitizers(cbuild_context_t* ctx, config_t* c, int mask) {
+    (void)ctx;
+    if (!c) return;
+    c->sanitize &= ~mask;
+}
+
+void cbuild_config_set_compiler(cbuild_context_t* ctx, config_t* c, const char* compiler) {
+    (void)ctx;
+    if (!c) return;
+    if (c->compiler) {
+        free((void*)c->compiler);
+        c->compiler = NULL;
+    }
+    c->compiler = compiler ? strdup(compiler) : NULL;
+}
+
+void cbuild_config_set_linker(cbuild_context_t* ctx, config_t* c, const char* linker) {
+    (void)ctx;
+    if (!c) return;
+    if (c->linker) {
+        free((void*)c->linker);
+        c->linker = NULL;
+    }
+    c->linker = linker ? strdup(linker) : NULL;
+}
+
+void cbuild_set_active_config(cbuild_context_t* ctx, config_t* c) {
+    ctx->active_config = c;
+}
+
+void cbuild_target_set_config(cbuild_context_t* ctx, target_t* t, config_t* c) {
+    if (!t) return;
+    for (int i = 0; i < ctx->cfg_count; ++i) {
+        if (ctx->cfg_targets[i] == t) {
+            ctx->cfg_values[i] = c;
+            return;
+        }
+    }
+    if (ctx->cfg_count + 1 > ctx->cfg_cap) {
+        ctx->cfg_cap = ctx->cfg_cap ? ctx->cfg_cap * 2 : 8;
+        ctx->cfg_targets = (target_t**)realloc(ctx->cfg_targets, ctx->cfg_cap * sizeof(*ctx->cfg_targets));
+        ctx->cfg_values = (config_t**)realloc(ctx->cfg_values, ctx->cfg_cap * sizeof(*ctx->cfg_values));
+    }
+    ctx->cfg_targets[ctx->cfg_count] = t;
+    ctx->cfg_values[ctx->cfg_count] = c;
+    ctx->cfg_count++;
+}
+
+/* ---------------- Pre-baked platform-aware standard configs ---------------- */
+
+config_t* cbuild_config_default_debug(cbuild_context_t* ctx) {
+    config_t* c = cbuild_config_new(ctx, "Debug");
+    if (!c) return NULL;
+
+    cbuild_config_set_output_dir(ctx, c, "build/debug");
+    cbuild_config_set_std(ctx, c, "c23");
+    cbuild_config_set_warnings(ctx, c, 2); /* -Wall -Wextra -Wpedantic or /W4 */
+    cbuild_config_set_opt(ctx, c, 0);
+    cbuild_config_set_debug(ctx, c, 1);
+
+#ifdef _WIN32
+    /* MSVC-specific niceties */
+    cbuild_config_add_cflags(ctx, c, "/nologo");
+    cbuild_config_add_cflags(ctx, c, "/WX");      /* treat warnings as errors */
+    cbuild_config_set_runtime(ctx, c, "dynamic"); /* /MD by default */
+#else
+    /* GCC/Clang on Linux/macOS */
+    cbuild_config_enable_sanitizers(ctx, c, 1 | 2); /* ASAN | UBSAN */
+    cbuild_config_add_cflags(ctx, c, "-Werror");    /* treat warnings as errors */
+#endif
+    return c;
+}
+
+config_t* cbuild_config_default_release(cbuild_context_t* ctx) {
+    config_t* c = cbuild_config_new(ctx, "Release");
+    if (!c) return NULL;
+
+    cbuild_config_set_output_dir(ctx, c, "build/release");
+    cbuild_config_set_std(ctx, c, "c23");
+    cbuild_config_set_warnings(ctx, c, 2); /* -Wall -Wextra -Wpedantic or /W4 */
+    cbuild_config_set_opt(ctx, c, 3);
+    cbuild_config_set_debug(ctx, c, 0);
+
+#ifdef _WIN32
+    /* MSVC-specific niceties */
+    cbuild_config_add_cflags(ctx, c, "/nologo");
+    cbuild_config_add_cflags(ctx, c, "/WX");      /* treat warnings as errors */
+    cbuild_config_set_runtime(ctx, c, "dynamic"); /* /MD by default */
+#else
+    /* GCC/Clang on Linux/macOS */
+    cbuild_config_add_cflags(ctx, c, "-Werror"); /* treat warnings as errors */
+#endif
+    return c;
+}
+
+config_t* cbuild_config_default_wasm32(cbuild_context_t* ctx) {
+    config_t* c = cbuild_config_new(ctx, "WASM32");
+    if (!c) return NULL;
+
+    cbuild_config_set_std(ctx, c, "c23");
+    cbuild_config_set_warnings(ctx, c, 2); /* -Wall -Wextra -Wpedantic or /W4 */
+    cbuild_config_set_opt(ctx, c, 3);
+    cbuild_config_set_debug(ctx, c, 0);
+
+    cbuild_config_add_cflags(ctx, c, "--target=wasm32");
+    cbuild_config_add_ldflags(ctx, c, "--target=wasm32");
+    cbuild_config_add_ldflags(ctx, c, "-nostdlib");
+
+    return c;
+}
+
+void cbuild_config_set_freestanding(cbuild_context_t* ctx, config_t* c, int on) {
+    (void)ctx;
+    if (!c) return;
+    c->freestanding = on ? 1 : 0;
+}
+
+void cbuild_guess_compiler(cbuild_context_t* ctx) {
+    #if defined(_WIN32)
+        cbuild_set_compiler(ctx, "cl");
+    #elif defined(__APPLE__)
+        cbuild_set_compiler(ctx, "clang");
+    #else
+        cbuild_set_compiler(ctx, "cc");
+    #endif
 }
 
 #endif /* CBUILD_IMPLEMENTATION */
