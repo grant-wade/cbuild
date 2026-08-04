@@ -27,6 +27,7 @@ Initial versioned release of the modern CBuild implementation.
 - Platform-specific object extensions no longer trigger macro redefinition warnings.
 - Successful recompiles always force relinking, even on filesystems with coarse timestamp resolution.
 - Parallel compilation no longer depends on unnamed POSIX semaphores, which are unavailable on macOS.
+- macOS CPU detection now uses `sysctlbyname` instead of unavailable `_SC_NPROCESSORS_ONLN` declarations.
 - Windows subproject commands now use PowerShell-compatible directory changes and invocation.
 
 [v0.1.0]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.0

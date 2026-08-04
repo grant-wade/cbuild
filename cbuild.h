@@ -488,6 +488,7 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 #include <sys/wait.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>  // _NSGetExecutablePath
+#include <sys/sysctl.h>   // sysctlbyname
 #endif
 #include <pthread.h>
 #include <strings.h>
@@ -5027,6 +5028,13 @@ static void cbuild_init(cbuild_context_t* ctx) {
         SYSTEM_INFO sysinfo;
         GetSystemInfo(&sysinfo);
         n = sysinfo.dwNumberOfProcessors;
+#elif defined(__APPLE__)
+        int logical_cpus = 0;
+        size_t logical_cpus_size = sizeof(logical_cpus);
+        if (sysctlbyname("hw.logicalcpu", &logical_cpus, &logical_cpus_size,
+                         NULL, 0) == 0 && logical_cpus > 0) {
+            n = logical_cpus;
+        }
 #else
         long cpus = sysconf(_SC_NPROCESSORS_ONLN);
         if (cpus > 0)

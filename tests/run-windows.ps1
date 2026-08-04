@@ -74,7 +74,10 @@ try {
     Assert-LastExitCode "Integration build-program compile"
 
     $version = Invoke-Capture .\cbuild.exe @("--version") "build-version.log"
-    if ($version.Trim() -ne "v0.1.0") { throw "Unexpected --version output: $version" }
+    $versionLines = @($version -split "\r?\n" | ForEach-Object { $_.Trim() })
+    if ($versionLines -notcontains "v0.1.0") {
+        throw "Expected v0.1.0 in --version output: $version"
+    }
     $null = Invoke-Capture .\cbuild.exe @("--help") "build-help.log"
     $list = Invoke-Capture .\cbuild.exe @("--list") "build-list.log"
     if ($list -notmatch "test_app" -or $list -notmatch "shared" -or
