@@ -1,5 +1,9 @@
 # CBuild
 
+[![CI and release](https://github.com/grant-wade/cbuild/actions/workflows/ci.yml/badge.svg)](https://github.com/grant-wade/cbuild/actions/workflows/ci.yml)
+
+**Current version: `v0.1.0`**
+
 CBuild is a cross-platform, single-header build system for C projects. Build descriptions are ordinary C programs, so they can use functions, loops, platform checks, and existing C libraries without a separate configuration language or runtime.
 
 ```c
@@ -45,11 +49,16 @@ int main(int argc, char **argv) {
 - Self-rebuilding build programs
 - Context-based API with no global build state, suitable for embedding
 
-CBuild does not use a content-addressed local build cache. Incremental metadata is stored beside build outputs as `.d`, `.sig`, and `.link.sig` files.
-
 ## Getting started
 
-Copy `cbuild.h` into a project and create `build.c` using the example above. Define `CBUILD_IMPLEMENTATION` in exactly one translation unit.
+Download `cbuild.h` from the [latest GitHub release](https://github.com/grant-wade/cbuild/releases/latest), or copy it from this repository. Create `build.c` using the example above and define `CBUILD_IMPLEMENTATION` in exactly one translation unit.
+
+The public version macros can be used at compile time or displayed by tools:
+
+```c
+printf("CBuild %s\n", CBUILD_VERSION);
+/* CBUILD_VERSION_MAJOR, CBUILD_VERSION_MINOR, CBUILD_VERSION_PATCH */
+```
 
 Compile the build program:
 
@@ -76,6 +85,7 @@ The `CBUILD_SELF_REBUILD` call recompiles and restarts the build program when an
 | Option | Description |
 | --- | --- |
 | `-h`, `--help` | Show built-in and project-defined options |
+| `--version` | Print `CBUILD_VERSION` and exit |
 | `-v`, `--verbose` | Show full compiler and linker commands |
 | `-j N`, `--jobs=N` | Set the number of parallel compile jobs |
 | `-t NAME`, `--target=NAME` | Build only a target and its dependencies |
@@ -213,7 +223,10 @@ Integer, string, and callback-based handlers are also available. Flag phases all
 
 - [`cbuild.h`](cbuild.h) contains the public declarations and implementation notes.
 - [`docs/api.md`](docs/api.md) summarizes the public API.
+- [`docs/releasing.md`](docs/releasing.md) documents the automated release process.
 - [`example/`](example/) demonstrates a main project linked to a CBuild subproject.
+- [`tests/`](tests/) documents and exercises the cross-platform test suite.
+- [`CHANGELOG.md`](CHANGELOG.md) records notable changes by version.
 
 ## License
 

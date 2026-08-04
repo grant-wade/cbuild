@@ -4,6 +4,17 @@ This is a compact reference for the public API in `cbuild.h`. Include the header
 
 All build state is owned by a `cbuild_context_t`. Unless noted otherwise, functions that create targets, commands, subprojects, and configurations attach them to the context and their storage is released by `cbuild_context_free`.
 
+## Version
+
+```c
+#define CBUILD_VERSION "v0.1.0"
+#define CBUILD_VERSION_MAJOR 0
+#define CBUILD_VERSION_MINOR 1
+#define CBUILD_VERSION_PATCH 0
+```
+
+Release tags exactly match `CBUILD_VERSION`. The numeric macros are suitable for preprocessor checks.
+
 ## Types
 
 | Type | Purpose |

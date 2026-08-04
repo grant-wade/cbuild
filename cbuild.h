@@ -54,6 +54,7 @@ Typical invocations:
     $ cc build.c -o cbuild            # or 'cl' on Windows
     $ ./cbuild                        # builds all targets
     $ ./cbuild --clean                # cleans build outputs
+    $ ./cbuild --version              # prints CBUILD_VERSION
     $ ./cbuild --run bar              # builds bar's target (if any) and runs the subcommand
     $ ./cbuild --list                 # lists targets
     $ ./cbuild --graph                # prints the build graph
@@ -177,6 +178,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #ifndef CBUILD_H
 #define CBUILD_H
+
+/* Public semantic version. Keep this in sync with release tags. */
+#define CBUILD_VERSION "v0.1.0"
+#define CBUILD_VERSION_MAJOR 0
+#define CBUILD_VERSION_MINOR 1
+#define CBUILD_VERSION_PATCH 0
 
 #ifdef __cplusplus
 extern "C" {
@@ -483,7 +490,6 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 #include <mach-o/dyld.h>  // _NSGetExecutablePath
 #endif
 #include <pthread.h>
-#include <semaphore.h>
 #include <strings.h>
 #include <unistd.h>
 
@@ -770,15 +776,14 @@ struct cbuild_context {
     int job_count;
     int job_capacity;
     int jobs_completed;
+    int compiled_count;
 
     /* Threading primitives */
 #ifdef _WIN32
     HANDLE* threads;
-    HANDLE job_semaphore;
     CRITICAL_SECTION queue_mutex;
 #else
     pthread_t* threads;
-    sem_t job_semaphore;
     pthread_mutex_t queue_mutex;
 #endif
 
@@ -1311,7 +1316,7 @@ static void* compile_worker(void* arg);
 static void enqueue_compile_job(cbuild_context_t* ctx, target_t* target, int source_index);
 
 // Function to process all compilation jobs in parallel
-static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* target, int* error_flag);
+static int process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* target, int* error_flag);
 
 #define CBUILD_MAX(a, b) ((a) > (b) ? (a) : (b))
 
@@ -2809,8 +2814,6 @@ static DWORD WINAPI compile_worker(void* arg) {
     compile_worker_arg_t* warg = (compile_worker_arg_t*)arg;
     cbuild_context_t* ctx = warg->ctx;
     while (1) {
-        WaitForSingleObject(ctx->job_semaphore, INFINITE);
-
         EnterCriticalSection(&ctx->queue_mutex);
         if (ctx->jobs_completed >= ctx->job_count || ctx->build_error) {
             LeaveCriticalSection(&ctx->queue_mutex);
@@ -2845,6 +2848,9 @@ static DWORD WINAPI compile_worker(void* arg) {
                 LeaveCriticalSection(&ctx->queue_mutex);
                 break;
             }
+            EnterCriticalSection(&ctx->queue_mutex);
+            ctx->compiled_count++;
+            LeaveCriticalSection(&ctx->queue_mutex);
         }
     }
     return 0;
@@ -2854,8 +2860,6 @@ static void* compile_worker(void* arg) {
     compile_worker_arg_t* warg = (compile_worker_arg_t*)arg;
     cbuild_context_t* ctx = warg->ctx;
     while (1) {
-        sem_wait(&ctx->job_semaphore);
-
         pthread_mutex_lock(&ctx->queue_mutex);
         if (ctx->jobs_completed >= ctx->job_count || ctx->build_error) {
             pthread_mutex_unlock(&ctx->queue_mutex);
@@ -2890,22 +2894,26 @@ static void* compile_worker(void* arg) {
                 pthread_mutex_unlock(&ctx->queue_mutex);
                 break;
             }
+            pthread_mutex_lock(&ctx->queue_mutex);
+            ctx->compiled_count++;
+            pthread_mutex_unlock(&ctx->queue_mutex);
         }
     }
     return NULL;
 }
 #endif
 
-static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* target, int* error_flag) {
+static int process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* target, int* error_flag) {
     ctx->job_count = 0;
     ctx->jobs_completed = 0;
+    ctx->compiled_count = 0;
     ctx->build_error = 0;
 
     for (int i = 0; i < target->sources_count; ++i) {
         enqueue_compile_job(ctx, target, i);
     }
 
-    if (ctx->job_count == 0) return;
+    if (ctx->job_count == 0) return 0;
 
     compile_worker_arg_t warg;
     warg.ctx = ctx;
@@ -2914,10 +2922,8 @@ static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* targe
 
 #ifdef _WIN32
     InitializeCriticalSection(&ctx->queue_mutex);
-    ctx->job_semaphore = CreateSemaphore(NULL, 0, ctx->job_count + thread_count, NULL);
 #else
     pthread_mutex_init(&ctx->queue_mutex, NULL);
-    sem_init(&ctx->job_semaphore, 0, 0);
 #endif
 
     ctx->threads = malloc(thread_count * sizeof(*ctx->threads));
@@ -2932,34 +2938,16 @@ static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* targe
     }
 #endif
 
-    for (int i = 0; i < ctx->job_count; ++i) {
-#ifdef _WIN32
-        ReleaseSemaphore(ctx->job_semaphore, 1, NULL);
-#else
-        sem_post(&ctx->job_semaphore);
-#endif
-    }
-
-    for (int i = 0; i < thread_count; ++i) {
-#ifdef _WIN32
-        ReleaseSemaphore(ctx->job_semaphore, 1, NULL);
-#else
-        sem_post(&ctx->job_semaphore);
-#endif
-    }
-
 #ifdef _WIN32
     WaitForMultipleObjects(thread_count, ctx->threads, TRUE, INFINITE);
     for (int i = 0; i < thread_count; ++i) {
         CloseHandle(ctx->threads[i]);
     }
-    CloseHandle(ctx->job_semaphore);
     DeleteCriticalSection(&ctx->queue_mutex);
 #else
     for (int i = 0; i < thread_count; ++i) {
         pthread_join(ctx->threads[i], NULL);
     }
-    sem_destroy(&ctx->job_semaphore);
     pthread_mutex_destroy(&ctx->queue_mutex);
 #endif
 
@@ -2975,6 +2963,7 @@ static void process_compile_jobs_parallel(cbuild_context_t* ctx, target_t* targe
     if (ctx->build_error) {
         *error_flag = 1;
     }
+    return ctx->compiled_count;
 }
 
 static void cbuild__apply_config_if_needed(cbuild_context_t* ctx, target_t* t) {
@@ -3553,7 +3542,8 @@ subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, co
 
     char* cmdline = NULL;
 #ifdef _WIN32
-    append_format(&cmdline, "cd /d \"%s\" && \"%s\"", directory, cbuild_exe);
+    /* Shell commands use PowerShell on Windows. */
+    append_format(&cmdline, "Set-Location -LiteralPath '%s'; & '%s'", directory, cbuild_exe);
 #else
     append_format(&cmdline, "cd '%s' && '%s'", directory, cbuild_exe);
 #endif
@@ -4513,6 +4503,13 @@ static int cbuild__flag_on_run(const char* v, void* u) {
     return 0;
 }
 
+static int cbuild__flag_on_version(const char* v, void* u) {
+    (void)v;
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild__log(ctx, CBUILD_LOG_INFO, "%s", CBUILD_VERSION);
+    return CBUILD_FLAG_EXIT;
+}
+
 static int cbuild__flag_on_help(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
@@ -4752,6 +4749,7 @@ int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv) {
                          "Build only the specified target", cbuild__flag_on_target, ctx);
     cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
                          "Emit compile_commands.json into the output dir", cbuild__flag_on_compile_commands, ctx);
+    cbuild_register_flag(ctx, "version", 0, 0, CBUILD_FLAG_PRE, "Show version and exit", cbuild__flag_on_version, ctx);
     cbuild_register_flag(ctx, "help", 'h', 0, CBUILD_FLAG_PRE, "Show help and exit", cbuild__flag_on_help, ctx);
 
     int rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_PRE, &argc, &argv);
@@ -4790,6 +4788,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
                          "Remove build outputs and exit", cbuild__flag_on_clean, ctx);
     cbuild_register_flag(ctx, "run", 'r', 1, CBUILD_FLAG_PRE,
                          "Run a registered subcommand after building its target", cbuild__flag_on_run, ctx);
+    cbuild_register_flag(ctx, "version", 0, 0, CBUILD_FLAG_PRE, "Show version and exit", cbuild__flag_on_version, ctx);
     cbuild_register_flag(ctx, "help", 'h', 0, CBUILD_FLAG_PRE, "Show help and exit", cbuild__flag_on_help, ctx);
 
     int rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_PRE, &argc, &argv);
@@ -5212,6 +5211,7 @@ void cbuild_teardown(cbuild_context_t* ctx) {
     ctx->job_capacity = 0;
     ctx->job_count = 0;
     ctx->jobs_completed = 0;
+    ctx->compiled_count = 0;
     ctx->build_error = 0;
 
     // Free flag handlers
@@ -5467,7 +5467,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         return;
     }
 
-    process_compile_jobs_parallel(ctx, t, error_flag);
+    int compiled_sources = process_compile_jobs_parallel(ctx, t, error_flag);
     if (*error_flag) return;
 
     int obj_count = t->sources_count;
@@ -5486,7 +5486,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         obj_files[i] = strdup(objname);
     }
 
-    int needs_link = 0;
+    int needs_link = compiled_sources > 0;
     struct stat st_out;
     if (stat(t->output_file, &st_out) != 0) {
         needs_link = 1;

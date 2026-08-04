@@ -1,0 +1,171 @@
+name: CI and release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: cbuild-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+          - name: Linux Clang
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - name: macOS Clang
+            os: macos-latest
+            cc: clang
+            cxx: clang++
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run cross-platform integration suite
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          chmod +x tests/run-posix.sh
+          tests/run-posix.sh
+
+  sanitizers:
+    name: Linux ASan and UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run integration suite with sanitizers
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -std=c11 -Wall -Wextra -Wpedantic -Werror -g -fno-omit-frame-pointer -fsanitize=address,undefined
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          chmod +x tests/run-posix.sh
+          tests/run-posix.sh
+
+  windows:
+    name: Windows MSVC
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Run Windows integration suite
+        shell: pwsh
+        env:
+          CC: cl
+        run: tests/run-windows.ps1
+
+  release:
+    name: Publish release if version changed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - unix
+      - sanitizers
+      - windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect unreleased header version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          current=$(awk '/^#define CBUILD_VERSION "/ { gsub(/"/, "", $3); print $3; exit }' cbuild.h)
+          major=$(awk '/^#define CBUILD_VERSION_MAJOR / { print $3; exit }' cbuild.h)
+          minor=$(awk '/^#define CBUILD_VERSION_MINOR / { print $3; exit }' cbuild.h)
+          patch=$(awk '/^#define CBUILD_VERSION_PATCH / { print $3; exit }' cbuild.h)
+
+          if [[ ! "$current" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "CBUILD_VERSION must be a semantic version such as v0.1.0; got '$current'" >&2
+            exit 1
+          fi
+          if [[ "$current" != "v${major}.${minor}.${patch}" ]]; then
+            echo "CBUILD_VERSION and its numeric components disagree" >&2
+            exit 1
+          fi
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if gh release view "$current" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "GitHub Release $current already exists; no release will be published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "GitHub Release $current does not exist yet; it will be published after this successful CI run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Package single-header release
+        if: steps.version.outputs.changed == 'true'
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.current }}
+        run: |
+          set -euo pipefail
+          package="cbuild-${RELEASE_VERSION}"
+          mkdir -p "dist/$package/docs"
+          cp cbuild.h LICENSE AUTHORS readme.md "dist/$package/"
+          cp cbuild.h dist/cbuild.h
+          cp docs/api.md "dist/$package/docs/"
+          tar -czf "dist/${package}.tar.gz" -C dist "$package"
+          (cd dist && python3 -m zipfile -c "${package}.zip" "$package")
+          (cd dist && sha256sum cbuild.h "${package}.tar.gz" "${package}.zip" > SHA256SUMS)
+      - name: Tag commit and create GitHub release
+        if: steps.version.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.current }}
+        run: |
+          set -euo pipefail
+          package="cbuild-${RELEASE_VERSION}"
+
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/$RELEASE_VERSION" >/dev/null; then
+            tagged_commit=$(git rev-list -n 1 "$RELEASE_VERSION")
+            if [[ "$tagged_commit" != "$GITHUB_SHA" ]]; then
+              echo "Tag $RELEASE_VERSION already points to $tagged_commit" >&2
+              exit 1
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_VERSION" -m "CBuild $RELEASE_VERSION" "$GITHUB_SHA"
+            git push origin "$RELEASE_VERSION"
+          fi
+
+          assets=(
+            "dist/cbuild.h"
+            "dist/${package}.tar.gz"
+            "dist/${package}.zip"
+            "dist/SHA256SUMS"
+          )
+          if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_VERSION" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_VERSION" "${assets[@]}" \
+              --verify-tag \
+              --title "CBuild $RELEASE_VERSION" \
+              --generate-notes
+          fi

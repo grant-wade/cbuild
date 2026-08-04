@@ -6,6 +6,11 @@ cbuild.old
 cbuild.exe.old
 compile_commands.json
 *.d
+*.o
+*.obj
 *.sig
 *.link.sig
+*.log
+/tests/api_smoke
+/tests/api_smoke.exe
 .DS_Store
