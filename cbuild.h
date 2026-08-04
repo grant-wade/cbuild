@@ -488,7 +488,10 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 #include <sys/wait.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>  // _NSGetExecutablePath
-#include <sys/sysctl.h>   // sysctlbyname
+/* Avoid <sys/sysctl.h>: strict POSIX feature modes hide BSD u_int types
+ * required by that header in recent macOS SDKs. */
+extern int sysctlbyname(const char* name, void* oldp, size_t* oldlenp,
+                        void* newp, size_t newlen);
 #endif
 #include <pthread.h>
 #include <strings.h>

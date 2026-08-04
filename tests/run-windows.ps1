@@ -127,8 +127,8 @@ try {
     }
 
     $noop = Invoke-Capture .\cbuild.exe @("-j2") "noop-build.log"
-    if ($noop -match "\b(COMPILE|LINK)\s") {
-        throw "No-op build unexpectedly compiled or linked a target"
+    if ($noop -cmatch "(?m)^(COMPILE|LINK)\s") {
+        throw "No-op build unexpectedly compiled or linked a target:`n$noop"
     }
 
     $feature = Invoke-Capture .\cbuild.exe @("--feature", "--target=test_app") "feature-build.log"
