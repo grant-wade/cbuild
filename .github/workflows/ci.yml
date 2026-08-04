@@ -70,8 +70,13 @@ jobs:
         env:
           CC: cl
         run: |
-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
-          if errorlevel 1 exit /b %errorlevel%
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS_PATH=%%i"
+          if not defined VS_PATH (
+            echo Visual Studio with the x64 C++ toolchain was not found.
+            exit /b 1
+          )
+          call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=x64
+          if errorlevel 1 exit /b 1
           pwsh -NoProfile -ExecutionPolicy Bypass -File tests/run-windows.ps1
 
   release:
