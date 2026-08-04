@@ -35,7 +35,7 @@ jobs:
             cxx: clang++
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run cross-platform integration suite
         env:
           CC: ${{ matrix.cc }}
@@ -48,7 +48,7 @@ jobs:
     name: Linux ASan and UBSan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run integration suite with sanitizers
         env:
           CC: clang
@@ -64,13 +64,15 @@ jobs:
     name: Windows MSVC
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/checkout@v5
       - name: Run Windows integration suite
-        shell: pwsh
+        shell: cmd
         env:
           CC: cl
-        run: tests/run-windows.ps1
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=x64
+          if errorlevel 1 exit /b %errorlevel%
+          pwsh -NoProfile -ExecutionPolicy Bypass -File tests/run-windows.ps1
 
   release:
     name: Publish release if version changed
@@ -83,7 +85,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Detect unreleased header version

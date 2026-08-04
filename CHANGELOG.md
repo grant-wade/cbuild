@@ -29,5 +29,6 @@ Initial versioned release of the modern CBuild implementation.
 - Parallel compilation no longer depends on unnamed POSIX semaphores, which are unavailable on macOS.
 - macOS CPU detection now uses `sysctlbyname` instead of unavailable `_SC_NPROCESSORS_ONLN` declarations.
 - Windows subproject commands now use PowerShell-compatible directory changes and invocation.
+- MSVC dependency tracking preserves header paths containing spaces, preventing perpetual no-op recompiles.
 
 [v0.1.0]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.0

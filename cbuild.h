@@ -2513,8 +2513,42 @@ static int need_recompile(cbuild_context_t* ctx, const char* src_file, const cha
     /* Check header dependencies from .d file */
     if (dep_file) {
         FILE* df = fopen(dep_file, "r");
-        if (df) {
-            /* Read the entire .d file */
+        if (!df) return 1;
+
+        /* MSVC uses a cbuild-specific, one-path-per-line format so paths
+         * containing spaces (such as Windows SDK paths) remain intact. */
+        if (cc_kind == CBUILD_CC_MSVC) {
+            char path[4096];
+            if (!fgets(path, sizeof(path), df)) {
+                fclose(df);
+                return 1;
+            }
+            path[strcspn(path, "\r\n")] = '\0';
+            if (strcmp(path, "CBUILD_MSVC_DEPS_V1") != 0) {
+                fclose(df);
+                return 1;
+            }
+
+            while (fgets(path, sizeof(path), df)) {
+                path[strcspn(path, "\r\n")] = '\0';
+                if (!path[0]) continue;
+
+                struct stat st_dep;
+                if (stat(path, &st_dep) != 0 || st_dep.st_mtime > st_obj.st_mtime) {
+#ifdef CBUILD_DEBUG_SIGNATURE
+                    fprintf(stderr, "DEBUG: MSVC dependency changed or missing for %s: %s\n",
+                            src_file, path);
+#endif
+                    fclose(df);
+                    return 1;
+                }
+            }
+            fclose(df);
+            return 0;
+        }
+
+        {
+            /* Read the entire make-style .d file */
             fseek(df, 0, SEEK_END);
             long fsize = ftell(df);
             fseek(df, 0, SEEK_SET);
@@ -2739,7 +2773,7 @@ static int compile_source(cbuild_context_t* ctx, const char* src_file, const cha
     if (output) {
         FILE* df = fopen(dep_file, "w");
         if (df) {
-            fprintf(df, "%s: %s", obj_file, src_file);
+            fprintf(df, "CBUILD_MSVC_DEPS_V1\n%s\n", src_file);
             char* saveptr = NULL;
             char* line = strtok_r(output, "\r\n", &saveptr);
             /* Allow override of the include tag for non-English locales */
@@ -2752,12 +2786,11 @@ static int compile_source(cbuild_context_t* ctx, const char* src_file, const cha
                     while (*pos == ' ' || *pos == '\t')
                         pos++;
                     if (*pos) {
-                        fprintf(df, " \\\n  %s", pos);
+                        fprintf(df, "%s\n", pos);
                     }
                 }
                 line = strtok_r(NULL, "\r\n", &saveptr);
             }
-            fprintf(df, "\n");
             fclose(df);
         }
         if (result != 0) {
