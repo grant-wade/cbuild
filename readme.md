@@ -2,7 +2,7 @@
 
 [![CI and release](https://github.com/grant-wade/cbuild/actions/workflows/ci.yml/badge.svg)](https://github.com/grant-wade/cbuild/actions/workflows/ci.yml)
 
-**Current version: `v0.1.0`**
+**Current version: `v0.1.1`**
 
 CBuild is a cross-platform, single-header build system for C projects. Build descriptions are ordinary C programs, so they can use functions, loops, platform checks, and existing C libraries without a separate configuration language or runtime.
 

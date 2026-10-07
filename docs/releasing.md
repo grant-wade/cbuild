@@ -9,10 +9,10 @@ A release is published only after the Linux GCC, Linux Clang, macOS Clang, Linux
 The canonical public version is declared in `cbuild.h`:
 
 ```c
-#define CBUILD_VERSION "v0.1.0"
+#define CBUILD_VERSION "v0.1.1"
 #define CBUILD_VERSION_MAJOR 0
 #define CBUILD_VERSION_MINOR 1
-#define CBUILD_VERSION_PATCH 0
+#define CBUILD_VERSION_PATCH 1
 ```
 
 The workflow requires semantic version format with a leading `v`, and verifies that the numeric macros agree with `CBUILD_VERSION`.
@@ -20,7 +20,7 @@ The workflow requires semantic version format with a leading `v`, and verifies t
 ## Release checklist
 
 1. Update all four version macros in `cbuild.h`.
-2. Update version assertions in `tests/api_smoke.c`, `tests/include_smoke.c`, and `tests/include_smoke.cpp`.
+2. Update version assertions in `tests/api_smoke.c`, `tests/include_smoke.c`, `tests/include_smoke.cpp`, `tests/run-posix.sh`, and `tests/run-windows.ps1`.
 3. Update the current version shown in `readme.md`.
 4. Add the new version and release notes to `CHANGELOG.md`.
 5. Open or update a pull request and wait for every CI job to pass.

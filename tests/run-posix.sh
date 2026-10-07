@@ -43,7 +43,7 @@ cd "$ROOT/tests/project"
 $CC $CFLAGS build.c -o cbuild
 
 ./cbuild --version > build-version.log
-grep -qx "v0.1.0" build-version.log
+grep -qx "v0.1.1" build-version.log
 ./cbuild --help > build-help.log
 ./cbuild --list > build-list.log
 grep -q "test_app" build-list.log
@@ -116,6 +116,9 @@ grep -q "Detected changes" self-rebuild.log
 
 ./cbuild --clean > clean.log
 test ! -e build/test_app
+
+# Rebuild-correctness and clean-safety regressions run on their own scratch copy.
+python3 "$ROOT/tests/run-regress.py"
 
 # Keep the repository's subproject example healthy too.
 cd "$ROOT/example"

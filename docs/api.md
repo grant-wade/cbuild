@@ -7,10 +7,10 @@ All build state is owned by a `cbuild_context_t`. Unless noted otherwise, functi
 ## Version
 
 ```c
-#define CBUILD_VERSION "v0.1.0"
+#define CBUILD_VERSION "v0.1.1"
 #define CBUILD_VERSION_MAJOR 0
 #define CBUILD_VERSION_MINOR 1
-#define CBUILD_VERSION_PATCH 0
+#define CBUILD_VERSION_PATCH 1
 ```
 
 Release tags exactly match `CBUILD_VERSION`. The numeric macros are suitable for preprocessor checks.
@@ -55,7 +55,7 @@ int cbuild_configure_from_argv(cbuild_context_t *ctx, int argc, char **argv);
 
 - `cbuild_run` processes the full CLI and performs the requested operation.
 - `cbuild_build` bypasses CLI parsing. Pass `NULL` to build all targets.
-- `cbuild_clean` removes outputs represented by the context and cleans subprojects.
+- `cbuild_clean` removes outputs represented by the context and cleans subprojects. It deletes each target's object directory and output file, then the output directory itself. Symbolic links are removed rather than followed, a symlinked output directory only loses the outputs CBuild knows about, and an output directory that is or contains the working directory is left alone. File-dependency targets with no commands are treated as inputs and are never deleted.
 - `cbuild_configure_from_argv` processes the common configuration options without starting a build.
 
 ## Creating targets
@@ -69,7 +69,7 @@ target_t *cbuild_file_dep_target(cbuild_context_t *ctx, const char *name,
                                  const char *file_path);
 ```
 
-A dummy target represents graph ordering without an output. A file-dependency target represents a generated or externally supplied file and can have sources and commands attached to it.
+A dummy target represents graph ordering without an output. A file-dependency target represents a generated or externally supplied file and can have sources and commands attached to it. Its commands run when the file is missing, older than one of its sources, or older than the output of a target it depends on; those dependencies (for example a generator executable) are built first.
 
 ## Populating targets
 
@@ -197,7 +197,7 @@ void cbuild_command_add_dependency(cbuild_context_t *ctx, command_t *cmd,
                                    command_t *dependency);
 ```
 
-Use argv commands when possible to avoid shell quoting. Shell commands run through the host shell; on Windows CBuild uses PowerShell.
+Command dependencies run before the command that names them; a dependency cycle fails the command with an error. Use argv commands when possible to avoid shell quoting. Shell commands run through the host shell; on Windows CBuild uses PowerShell.
 
 ## Subprojects and subcommands
 

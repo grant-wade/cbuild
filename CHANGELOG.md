@@ -2,6 +2,30 @@
 
 All notable changes to CBuild are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [v0.1.1] - 2026-10-07
+
+Correctness release: CBuild should not skip a necessary rebuild, rebuild unchanged sources, or delete files it did not produce.
+
+### Changed
+
+- Change detection compares file timestamps at the full resolution the platform records (nanoseconds on Linux and macOS, 100ns on Windows) instead of whole seconds, so an edit made within the same second as the previous build is no longer missed.
+- The regression suite in `tests/regress` runs on Linux, macOS, and Windows through a shared Python driver.
+
+### Fixed
+
+- A failed compile removes the stale object file and its signature, and on MSVC no longer replaces the recorded header list with a partial one, so restoring an older file cannot make the failure look up to date.
+- MSVC compile errors are printed in full instead of being cut off after the first line.
+- GCC-style compilers on Windows keep their `-MMD` dependency file instead of having it overwritten in the MSVC format.
+
+- `cbuild_set_output_file` paths are no longer overwritten with the default output path when the build starts.
+- GCC/Clang dependency files with escaped spaces (and `\#`, `$$`, or `-MP` phony rules) are parsed correctly, so sources under paths containing spaces stop recompiling on every build.
+- Circular command dependencies are reported as an error instead of recursing until the stack overflows.
+- `--clean` never follows symbolic links, refuses to sweep an output directory that is or contains the working directory, and leaves file-dependency targets without commands (files CBuild did not create) in place. It also removes the link signature next to outputs placed outside the output directory.
+- `compile_commands.json` uses each target's effective compiler and flags, reflects `BEFORE_BUILD` flag callbacks, and no longer lists the inputs of generated-file targets as translation units.
+- Generated-file targets build their own target dependencies first and regenerate when one of them is rebuilt.
+- A target relinks whenever a dependency was rebuilt in the same build, even when both share a timestamp on filesystems with coarse resolution.
+- Long include paths and defines are no longer silently truncated on the compiler command line.
+
 ## [v0.1.0] - 2026-08-03
 
 Initial versioned release of the modern CBuild implementation.
@@ -31,4 +55,5 @@ Initial versioned release of the modern CBuild implementation.
 - Windows subproject commands now use PowerShell-compatible directory changes and invocation.
 - MSVC dependency tracking preserves header paths containing spaces, preventing perpetual no-op recompiles.
 
+[v0.1.1]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.0

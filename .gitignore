@@ -13,4 +13,5 @@ compile_commands.json
 *.log
 /tests/api_smoke
 /tests/api_smoke.exe
+/tests/regress work/
 .DS_Store

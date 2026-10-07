@@ -180,10 +180,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define CBUILD_H
 
 /* Public semantic version. Keep this in sync with release tags. */
-#define CBUILD_VERSION "v0.1.0"
+#define CBUILD_VERSION "v0.1.1"
 #define CBUILD_VERSION_MAJOR 0
 #define CBUILD_VERSION_MINOR 1
-#define CBUILD_VERSION_PATCH 0
+#define CBUILD_VERSION_PATCH 1
 
 #ifdef __cplusplus
 extern "C" {
@@ -545,16 +545,47 @@ static char* cbuild__normalize_path(const char* path) {
     return normalized;
 }
 
+/* Modification time in the finest unit the platform reports (100ns ticks on
+ * Windows, nanoseconds elsewhere). Only meaningful for comparing two files. */
+typedef unsigned long long cbuild_mtime_t;
+
+/* Returns 0 and fills *out, or -1 when the path cannot be examined. */
+static int cbuild__mtime(const char* path, cbuild_mtime_t* out) {
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA data;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &data)) return -1;
+    *out = ((cbuild_mtime_t)data.ftLastWriteTime.dwHighDateTime << 32) |
+           (cbuild_mtime_t)data.ftLastWriteTime.dwLowDateTime;
+    return 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    cbuild_mtime_t nsec = 0;
+    /* The sub-second field has no portable name. Where st_mtime is a macro it
+     * aliases the seconds of a timespec member, which tells the layouts apart
+     * even when this header is not the first include. */
+#if defined(st_mtime) && defined(__APPLE__)
+    nsec = (cbuild_mtime_t)st.st_mtimespec.tv_nsec;
+#elif defined(st_mtime)
+    nsec = (cbuild_mtime_t)st.st_mtim.tv_nsec;
+#elif defined(__APPLE__) || defined(__GLIBC__)
+    nsec = (cbuild_mtime_t)st.st_mtimensec;
+#endif
+    *out = (cbuild_mtime_t)st.st_mtime * 1000000000ULL + nsec;
+    return 0;
+#endif
+}
+
 static int cbuild__needs_rebuild(const char* exe_path, const char** sources,
                                  int sources_count) {
-    struct stat st_exe;
-    if (stat(exe_path, &st_exe) != 0)
+    cbuild_mtime_t exe_mtime;
+    if (cbuild__mtime(exe_path, &exe_mtime) != 0)
         return 1;
     for (int i = 0; i < sources_count; ++i) {
-        struct stat st_src;
-        if (stat(sources[i], &st_src) != 0)
+        cbuild_mtime_t src_mtime;
+        if (cbuild__mtime(sources[i], &src_mtime) != 0)
             continue;
-        if (st_src.st_mtime > st_exe.st_mtime)
+        if (src_mtime > exe_mtime)
             return 1;
     }
     return 0;
@@ -949,6 +980,7 @@ struct cbuild_command {
     command_t** dependencies;
     int dep_count, dep_cap;
     int executed;
+    int in_progress;  // set while running, to detect dependency cycles
     int result;
 };
 
@@ -1020,6 +1052,7 @@ struct cbuild_target {
     int ldflag_count;
     int ldflag_cap;
     char* output_file;     // path to final output (exe, .a, .dll/.so)
+    int output_file_explicit;  // set by cbuild_set_output_file; never re-derived
     char* obj_dir;         // directory for this target's object files (and .d files)
     command_t** commands;  // commands to run before building this target
     int cmd_count, cmd_cap;
@@ -1031,6 +1064,7 @@ struct cbuild_target {
     char* soname;  // SONAME (Linux) or install_name (macOS) for shared libraries
     int config_applied;
     int external;  // output is produced by a subproject, not linked by this context
+    int rebuilt;   // output was (re)produced during the current build pass
 
     // per-target tool overrides (from config or explicit)
     char* compiler;        // Override global g_cc for this target
@@ -1300,6 +1334,7 @@ static int need_recompile(cbuild_context_t* ctx, const char* src_file, const cha
                           const char* dep_file, target_t* t);
 static void remove_file(cbuild_context_t* ctx, const char* path);
 static void remove_dir_recursive(cbuild_context_t* ctx, const char* path);
+static void cbuild__clean_dir(cbuild_context_t* ctx, const char* path);
 static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag);
 static int cbuild_add_to_file_list(char*** files, int* file_count,
                                    int* capacity, const char* path);
@@ -2367,87 +2402,172 @@ static const char* cbuild_target_linker(cbuild_context_t* ctx, target_t* t) {
     return t->linker ? t->linker : ctx->ld;
 }
 
+static void cbuild__argv_append_prefixed(cbuild_argv_t* argv, const char* prefix, const char* value) {
+    char* arg = NULL;
+    if (append_format(&arg, "%s%s", prefix, value) == 0) {
+        cbuild_argv_append(argv, arg);
+    }
+    free(arg);
+}
+
+/* Build the compiler argv for one source file. The compile step, the rebuild
+ * signature, and compile_commands.json all go through here so they cannot drift. */
+static void cbuild__compile_argv(cbuild_context_t* ctx, target_t* t, const char* src_file,
+                                 const char* obj_file, const char* dep_file, cbuild_argv_t* argv) {
+    int msvc = cbuild_target_cc_kind(ctx, t) == CBUILD_CC_MSVC;
+    const char* inc_prefix = msvc ? "/I" : "-I";
+    const char* def_prefix = msvc ? "/D" : "-D";
+
+    /* Use append_flags to handle compilers with spaces (e.g., "zig cc -target ...") */
+    cbuild_argv_append_flags(argv, cbuild_target_compiler(ctx, t));
+
+    if (msvc) {
+        cbuild_argv_append(argv, "/c");
+        cbuild_argv_append(argv, "/nologo");
+        cbuild__argv_append_prefixed(argv, "/Fo", obj_file);
+        cbuild_argv_append(argv, "/showIncludes");
+    } else {
+        cbuild_argv_append(argv, "-c");
+        cbuild_argv_append(argv, "-o");
+        cbuild_argv_append(argv, obj_file);
+        /* Add dependency generation flags for GCC/Clang */
+        if (dep_file) {
+            cbuild_argv_append(argv, "-MMD");
+            cbuild_argv_append(argv, "-MF");
+            cbuild_argv_append(argv, dep_file);
+        }
+    }
+
+    for (int i = 0; i < ctx->global_cflag_count; ++i) {
+        cbuild_argv_append(argv, ctx->global_cflags[i]);
+    }
+    for (int i = 0; i < t->cflag_count; ++i) {
+        cbuild_argv_append(argv, t->cflags[i]);
+    }
+    for (int i = 0; i < t->include_count; ++i) {
+        cbuild__argv_append_prefixed(argv, inc_prefix, t->include_dirs[i]);
+    }
+    for (int i = 0; i < ctx->global_def_count; ++i) {
+        cbuild__argv_append_prefixed(argv, def_prefix, ctx->global_defines[i]);
+    }
+    for (int i = 0; i < t->define_count; ++i) {
+        cbuild__argv_append_prefixed(argv, def_prefix, t->defines[i]);
+    }
+
+    cbuild_argv_append(argv, src_file);
+}
+
+/* Everything that must stay the same for an object file to be reusable. */
+static char* cbuild__compile_signature(cbuild_argv_t* argv) {
+    char* sig = NULL;
+    for (int i = 0; i < argv->count; ++i) {
+        append_format(&sig, "%s\n", argv->args[i]);
+    }
+    const char* ev;
+    ev = getenv("CFLAGS");
+    if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
+    ev = getenv("CPPFLAGS");
+    if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
+    return sig;
+}
+
+static int cbuild__is_line_continuation(const char* p) {
+    return p[0] == '\\' && (p[1] == '\n' || (p[1] == '\r' && p[2] == '\n'));
+}
+
+/* Returns 1 when a make-style dependency file (GCC/Clang -MMD) is unreadable, or
+ * names a prerequisite that is missing or newer than obj_mtime. Understands the
+ * escapes compilers emit: "\ " and "\#" for literal characters, "$$" for "$". */
+static int cbuild__make_deps_outdated(const char* dep_file, cbuild_mtime_t obj_mtime) {
+    FILE* df = fopen(dep_file, "rb");
+    if (!df) return 1;
+    fseek(df, 0, SEEK_END);
+    long fsize = ftell(df);
+    fseek(df, 0, SEEK_SET);
+    char* content = (fsize >= 0) ? (char*)malloc((size_t)fsize + 1) : NULL;
+    if (!content) {
+        fclose(df);
+        return 1;
+    }
+    size_t read_size = fread(content, 1, (size_t)fsize, df);
+    content[read_size] = '\0';
+    fclose(df);
+
+    /* Skip "target:". The separator colon is followed by whitespace or a line
+     * continuation, which tells it apart from a Windows drive letter (C:\...). */
+    char* p = content;
+    while (*p && !(*p == ':' && (p[1] == '\0' || p[1] == ' ' || p[1] == '\t' || p[1] == '\n' ||
+                                 p[1] == '\r' || cbuild__is_line_continuation(p + 1)))) {
+        p++;
+    }
+    if (!*p) {
+        free(content);
+        return 1;
+    }
+    p++;
+
+    int outdated = 0;
+    while (!outdated) {
+        for (;;) {
+            if (*p == ' ' || *p == '\t' || *p == '\r') {
+                p++;
+            } else if (cbuild__is_line_continuation(p)) {
+                p += (p[1] == '\r') ? 3 : 2;
+            } else {
+                break;
+            }
+        }
+        /* Only the first rule lists prerequisites; -MP adds phony rules after it. */
+        if (*p == '\0' || *p == '\n') break;
+
+        /* Unescape the path in place; the result is never longer than the input. */
+        char* token = p;
+        char* out = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r' &&
+               !cbuild__is_line_continuation(p)) {
+            if (*p == '\\') {
+                /* Make halves a run of backslashes before a space or '#'; an odd
+                 * run makes that character literal. Elsewhere they stand as-is. */
+                size_t run = 1;
+                while (p[run] == '\\') run++;
+                char next = p[run];
+                if (next == ' ' || next == '\t' || next == '#') {
+                    for (size_t k = 0; k < run / 2; ++k) *out++ = '\\';
+                    p += run;
+                    if (run % 2) *out++ = *p++;
+                    continue;
+                }
+            } else if (*p == '$' && p[1] == '$') {
+                p++;
+            }
+            *out++ = *p++;
+        }
+        char terminator = *p;
+        *out = '\0';
+
+        cbuild_mtime_t dep_mtime;
+        if (cbuild__mtime(token, &dep_mtime) != 0 || dep_mtime > obj_mtime) outdated = 1;
+
+        if (out == p) *p = terminator;
+    }
+
+    free(content);
+    return outdated;
+}
+
 static int need_recompile(cbuild_context_t* ctx, const char* src_file, const char* obj_file,
                           const char* dep_file, target_t* t) {
     /* First: compute and compare a signature of the would-be compile command */
     char* sig = NULL;
-    const char* cc = cbuild_target_compiler(ctx, t);
     cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
     {
         cbuild_argv_t argv;
         cbuild_argv_init(&argv);
-
-        /* Rebuild the same argv used by compile_source() */
-        /* Use append_flags to handle compilers with spaces (e.g., "zig cc -target ...") */
-        cbuild_argv_append_flags(&argv, cc);
-
-        if (cc_kind == CBUILD_CC_MSVC) {
-            cbuild_argv_append(&argv, "/c");
-            cbuild_argv_append(&argv, "/nologo");
-            char fo_arg[1024];
-            snprintf(fo_arg, sizeof(fo_arg), "/Fo%s", obj_file);
-            cbuild_argv_append(&argv, fo_arg);
-            cbuild_argv_append(&argv, "/showIncludes");
-        } else {
-            cbuild_argv_append(&argv, "-c");
-            cbuild_argv_append(&argv, "-o");
-            cbuild_argv_append(&argv, obj_file);
-            if (dep_file) {
-                cbuild_argv_append(&argv, "-MMD");
-                cbuild_argv_append(&argv, "-MF");
-                cbuild_argv_append(&argv, dep_file);
-            }
-        }
-
-        for (int i = 0; i < ctx->global_cflag_count; ++i) {
-            cbuild_argv_append(&argv, ctx->global_cflags[i]);
-        }
-        for (int i = 0; i < t->cflag_count; ++i) {
-            cbuild_argv_append(&argv, t->cflags[i]);
-        }
-
-        for (int i = 0; i < t->include_count; ++i) {
-            char inc_arg[1024];
-            if (cc_kind == CBUILD_CC_MSVC) {
-                snprintf(inc_arg, sizeof(inc_arg), "/I%s", t->include_dirs[i]);
-            } else {
-                snprintf(inc_arg, sizeof(inc_arg), "-I%s", t->include_dirs[i]);
-            }
-            cbuild_argv_append(&argv, inc_arg);
-        }
-
-        for (int i = 0; i < ctx->global_def_count; ++i) {
-            char def_arg[512];
-            if (cc_kind == CBUILD_CC_MSVC) {
-                snprintf(def_arg, sizeof(def_arg), "/D%s", ctx->global_defines[i]);
-            } else {
-                snprintf(def_arg, sizeof(def_arg), "-D%s", ctx->global_defines[i]);
-            }
-            cbuild_argv_append(&argv, def_arg);
-        }
-
-        for (int i = 0; i < t->define_count; ++i) {
-            char def_arg[512];
-            if (cc_kind == CBUILD_CC_MSVC) {
-                snprintf(def_arg, sizeof(def_arg), "/D%s", t->defines[i]);
-            } else {
-                snprintf(def_arg, sizeof(def_arg), "-D%s", t->defines[i]);
-            }
-            cbuild_argv_append(&argv, def_arg);
-        }
-
-        cbuild_argv_append(&argv, src_file);
-
-        for (int i = 0; i < argv.count; ++i) {
-            append_format(&sig, "%s\n", argv.args[i]);
-        }
-        const char* ev;
-        ev = getenv("CFLAGS");
-        if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
-        ev = getenv("CPPFLAGS");
-        if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
+        cbuild__compile_argv(ctx, t, src_file, obj_file, dep_file, &argv);
+        sig = cbuild__compile_signature(&argv);
         cbuild_argv_free(&argv);
     }
+    if (!sig) return 1;
 
     char sigpath[1024];
     snprintf(sigpath, sizeof(sigpath), "%s.sig", obj_file);
@@ -2489,23 +2609,23 @@ static int need_recompile(cbuild_context_t* ctx, const char* src_file, const cha
     }
 
     /* Fallback: timestamp checks on src/object and header dependencies */
-    struct stat st_src, st_obj;
-    if (stat(src_file, &st_src) != 0) {
+    cbuild_mtime_t src_mtime, obj_mtime;
+    if (cbuild__mtime(src_file, &src_mtime) != 0) {
 #ifdef CBUILD_DEBUG_SIGNATURE
         fprintf(stderr, "DEBUG: stat() failed for source file: %s\n", src_file);
 #endif
         return 1;
     }
-    if (stat(obj_file, &st_obj) != 0) {
+    if (cbuild__mtime(obj_file, &obj_mtime) != 0) {
 #ifdef CBUILD_DEBUG_SIGNATURE
         fprintf(stderr, "DEBUG: stat() failed for object file: %s\n", obj_file);
 #endif
         return 1;
     }
-    if (st_src.st_mtime > st_obj.st_mtime) {
+    if (src_mtime > obj_mtime) {
 #ifdef CBUILD_DEBUG_SIGNATURE
-        fprintf(stderr, "DEBUG: Source newer than object: %s (src=%lld, obj=%lld)\n",
-                src_file, (long long)st_src.st_mtime, (long long)st_obj.st_mtime);
+        fprintf(stderr, "DEBUG: Source newer than object: %s (src=%llu, obj=%llu)\n",
+                src_file, src_mtime, obj_mtime);
 #endif
         return 1;
     }
@@ -2533,8 +2653,8 @@ static int need_recompile(cbuild_context_t* ctx, const char* src_file, const cha
                 path[strcspn(path, "\r\n")] = '\0';
                 if (!path[0]) continue;
 
-                struct stat st_dep;
-                if (stat(path, &st_dep) != 0 || st_dep.st_mtime > st_obj.st_mtime) {
+                cbuild_mtime_t dep_mtime;
+                if (cbuild__mtime(path, &dep_mtime) != 0 || dep_mtime > obj_mtime) {
 #ifdef CBUILD_DEBUG_SIGNATURE
                     fprintf(stderr, "DEBUG: MSVC dependency changed or missing for %s: %s\n",
                             src_file, path);
@@ -2547,79 +2667,12 @@ static int need_recompile(cbuild_context_t* ctx, const char* src_file, const cha
             return 0;
         }
 
-        {
-            /* Read the entire make-style .d file */
-            fseek(df, 0, SEEK_END);
-            long fsize = ftell(df);
-            fseek(df, 0, SEEK_SET);
-
-            char* content = (char*)malloc(fsize + 1);
-            if (content) {
-                size_t read_size = fread(content, 1, fsize, df);
-                content[read_size] = '\0';
-                fclose(df);
-
-                /* First, normalize line continuations: replace " \\n" or " \\\r\n" with space */
-                char* out = content;
-                char* in = content;
-                while (*in) {
-                    /* Check for line continuation: backslash followed by newline */
-                    if (in[0] == '\\' && (in[1] == '\n' || (in[1] == '\r' && in[2] == '\n'))) {
-                        /* Skip the backslash and newline, replace with space */
-                        *out++ = ' ';
-                        in += (in[1] == '\r') ? 3 : 2;
-                    } else {
-                        *out++ = *in++;
-                    }
-                }
-                *out = '\0';
-
-                /* Parse dependencies - format is: target: dep1 dep2 dep3 ... */
-                /* On Windows, skip drive letter colon (e.g., C:) */
-                char* p = content;
-#ifdef _WIN32
-                /* Skip drive letter if present (e.g., "C:\...") */
-                if (p[0] && p[1] == ':' && (p[2] == '\\' || p[2] == '/')) {
-                    p += 2;
-                }
-#endif
-                p = strchr(p, ':');
-                if (p) {
-                    p++; /* Skip the ':' */
-
-                    /* Parse each dependency - now we can safely split on whitespace only */
-                    char* saveptr = NULL;
-                    char* token = strtok_r(p, " \t\n\r", &saveptr);
-                    while (token) {
-                        /* Skip empty tokens */
-                        if (strlen(token) > 0) {
-                            struct stat st_dep;
-                            if (stat(token, &st_dep) == 0) {
-                                /* If any dependency is newer than object file, recompile */
-                                if (st_dep.st_mtime > st_obj.st_mtime) {
+        fclose(df);
+        if (cbuild__make_deps_outdated(dep_file, obj_mtime)) {
 #ifdef CBUILD_DEBUG_SIGNATURE
-                                    fprintf(stderr, "DEBUG: Header dep newer than object for %s: %s (dep=%lld, obj=%lld)\n",
-                                            src_file, token, (long long)st_dep.st_mtime, (long long)st_obj.st_mtime);
+            fprintf(stderr, "DEBUG: Header dep changed or missing for %s\n", src_file);
 #endif
-                                    free(content);
-                                    return 1;
-                                }
-                            } else {
-                                /* Dependency file doesn't exist, need to recompile */
-#ifdef CBUILD_DEBUG_SIGNATURE
-                                fprintf(stderr, "DEBUG: Header dep stat() failed for %s: %s\n", src_file, token);
-#endif
-                                free(content);
-                                return 1;
-                            }
-                        }
-                        token = strtok_r(NULL, " \t\n\r", &saveptr);
-                    }
-                }
-                free(content);
-            } else {
-                fclose(df);
-            }
+            return 1;
         }
     }
 
@@ -2681,73 +2734,9 @@ static int compile_source(cbuild_context_t* ctx, const char* src_file, const cha
                           const char* dep_file, target_t* t) {
     ensure_dir_exists(t->obj_dir);
 
-    const char* cc = cbuild_target_compiler(ctx, t);
-    cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
-
-    /* Build argv for compilation */
     cbuild_argv_t argv;
     cbuild_argv_init(&argv);
-
-    /* Use append_flags to handle compilers with spaces (e.g., "zig cc -target ...") */
-    cbuild_argv_append_flags(&argv, cc);
-
-    if (cc_kind == CBUILD_CC_MSVC) {
-        cbuild_argv_append(&argv, "/c");
-        cbuild_argv_append(&argv, "/nologo");
-        char fo_arg[1024];
-        snprintf(fo_arg, sizeof(fo_arg), "/Fo%s", obj_file);
-        cbuild_argv_append(&argv, fo_arg);
-        cbuild_argv_append(&argv, "/showIncludes");
-    } else {
-        cbuild_argv_append(&argv, "-c");
-        cbuild_argv_append(&argv, "-o");
-        cbuild_argv_append(&argv, obj_file);
-        /* Add dependency generation flags for GCC/Clang */
-        if (dep_file) {
-            cbuild_argv_append(&argv, "-MMD");
-            cbuild_argv_append(&argv, "-MF");
-            cbuild_argv_append(&argv, dep_file);
-        }
-    }
-
-    for (int i = 0; i < ctx->global_cflag_count; ++i) {
-        cbuild_argv_append(&argv, ctx->global_cflags[i]);
-    }
-    for (int i = 0; i < t->cflag_count; ++i) {
-        cbuild_argv_append(&argv, t->cflags[i]);
-    }
-
-    for (int i = 0; i < t->include_count; ++i) {
-        char inc_arg[1024];
-        if (cc_kind == CBUILD_CC_MSVC) {
-            snprintf(inc_arg, sizeof(inc_arg), "/I%s", t->include_dirs[i]);
-        } else {
-            snprintf(inc_arg, sizeof(inc_arg), "-I%s", t->include_dirs[i]);
-        }
-        cbuild_argv_append(&argv, inc_arg);
-    }
-
-    for (int i = 0; i < ctx->global_def_count; ++i) {
-        char def_arg[512];
-        if (cc_kind == CBUILD_CC_MSVC) {
-            snprintf(def_arg, sizeof(def_arg), "/D%s", ctx->global_defines[i]);
-        } else {
-            snprintf(def_arg, sizeof(def_arg), "-D%s", ctx->global_defines[i]);
-        }
-        cbuild_argv_append(&argv, def_arg);
-    }
-
-    for (int i = 0; i < t->define_count; ++i) {
-        char def_arg[512];
-        if (cc_kind == CBUILD_CC_MSVC) {
-            snprintf(def_arg, sizeof(def_arg), "/D%s", t->defines[i]);
-        } else {
-            snprintf(def_arg, sizeof(def_arg), "-D%s", t->defines[i]);
-        }
-        cbuild_argv_append(&argv, def_arg);
-    }
-
-    cbuild_argv_append(&argv, src_file);
+    cbuild__compile_argv(ctx, t, src_file, obj_file, dep_file, &argv);
 
     // Print command in verbose mode before executing
     if (ctx->verbose) {
@@ -2769,8 +2758,14 @@ static int compile_source(cbuild_context_t* ctx, const char* src_file, const cha
     char* output = NULL;
     result = cbuild_spawn_process(ctx, &argv, 1, &output);
 
-#ifdef _WIN32
-    if (output) {
+    /* Report failures first: the dependency scan below tokenizes output in place */
+    if (output && result != 0) {
+        fwrite(output, 1, strlen(output), stderr);
+    }
+
+    /* MSVC reports headers on stdout (/showIncludes). Only a successful compile
+     * may replace the dependency list: a failed one stops before listing them all. */
+    if (output && result == 0 && dep_file && cbuild_target_cc_kind(ctx, t) == CBUILD_CC_MSVC) {
         FILE* df = fopen(dep_file, "w");
         if (df) {
             fprintf(df, "CBUILD_MSVC_DEPS_V1\n%s\n", src_file);
@@ -2793,38 +2788,27 @@ static int compile_source(cbuild_context_t* ctx, const char* src_file, const cha
             }
             fclose(df);
         }
-        if (result != 0) {
-            fwrite(output, 1, strlen(output), stderr);
-        }
-        free(output);
-    }
-#else
-    if (output && result != 0) {
-        fwrite(output, 1, strlen(output), stderr);
     }
     if (output)
         free(output);
-#endif
 
     /* Write compile signature for change detection (only on success) */
+    char sigpath[1024];
+    snprintf(sigpath, sizeof(sigpath), "%s.sig", obj_file);
     if (result == 0) {
-        char* sig = NULL;
-        for (int i = 0; i < argv.count; ++i) {
-            append_format(&sig, "%s\n", argv.args[i]);
-        }
-        const char* ev;
-        ev = getenv("CFLAGS");
-        if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
-        ev = getenv("CPPFLAGS");
-        if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
-        char sigpath[1024];
-        snprintf(sigpath, sizeof(sigpath), "%s.sig", obj_file);
+        char* sig = cbuild__compile_signature(&argv);
         FILE* sf = fopen(sigpath, "wb");
         if (sf) {
-            fwrite(sig, 1, strlen(sig), sf);
+            if (sig) fwrite(sig, 1, strlen(sig), sf);
             fclose(sf);
         }
         if (sig) free(sig);
+    } else {
+        /* Not every compiler deletes the previous object when it fails. Left in
+         * place it could pass for up to date once the error is "fixed" by
+         * restoring an older file. */
+        remove(obj_file);
+        remove(sigpath);
     }
 
     cbuild_argv_free(&argv);
@@ -3221,6 +3205,10 @@ static void cbuild__apply_config_if_needed(cbuild_context_t* ctx, target_t* t) {
 static void collect_compile_commands_for_target(cbuild_context_t* ctx, target_t* t) {
     if (!ctx->generate_compile_commands)
         return;
+    /* File-dep "sources" are generator inputs, not translation units. */
+    if (t->external || !t->obj_dir ||
+        (t->type != TARGET_EXECUTABLE && t->type != TARGET_STATIC_LIB && t->type != TARGET_SHARED_LIB))
+        return;
     cbuild__apply_config_if_needed(ctx, t);
     for (int i = 0; i < t->sources_count; ++i) {
         const char* src_file = t->sources[i];
@@ -3234,65 +3222,11 @@ static void collect_compile_commands_for_target(cbuild_context_t* ctx, target_t*
         char objname[512];
         snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
 
-        /* Build argv exactly as compile_source does */
+        /* Same argv as compile_source, minus -MMD/-MF: those are for build
+           system use, not semantic analysis */
         cbuild_argv_t argv;
         cbuild_argv_init(&argv);
-
-        cbuild_argv_append(&argv, ctx->cc);
-
-        if (ctx->cc_kind == CBUILD_CC_MSVC) {
-            cbuild_argv_append(&argv, "/c");
-            cbuild_argv_append(&argv, "/nologo");
-            char fo_arg[1024];
-            snprintf(fo_arg, sizeof(fo_arg), "/Fo%s", objname);
-            cbuild_argv_append(&argv, fo_arg);
-            cbuild_argv_append(&argv, "/showIncludes");
-        } else {
-            cbuild_argv_append(&argv, "-c");
-            cbuild_argv_append(&argv, "-o");
-            cbuild_argv_append(&argv, objname);
-            /* Note: we don't include -MMD/-MF in compile_commands.json
-               as they're for build system use, not semantic analysis */
-        }
-
-        for (int j = 0; j < ctx->global_cflag_count; ++j) {
-            cbuild_argv_append(&argv, ctx->global_cflags[j]);
-        }
-        for (int j = 0; j < t->cflag_count; ++j) {
-            cbuild_argv_append(&argv, t->cflags[j]);
-        }
-
-        for (int j = 0; j < t->include_count; ++j) {
-            char inc_arg[1024];
-            if (ctx->cc_kind == CBUILD_CC_MSVC) {
-                snprintf(inc_arg, sizeof(inc_arg), "/I%s", t->include_dirs[j]);
-            } else {
-                snprintf(inc_arg, sizeof(inc_arg), "-I%s", t->include_dirs[j]);
-            }
-            cbuild_argv_append(&argv, inc_arg);
-        }
-
-        for (int j = 0; j < ctx->global_def_count; ++j) {
-            char def_arg[512];
-            if (ctx->cc_kind == CBUILD_CC_MSVC) {
-                snprintf(def_arg, sizeof(def_arg), "/D%s", ctx->global_defines[j]);
-            } else {
-                snprintf(def_arg, sizeof(def_arg), "-D%s", ctx->global_defines[j]);
-            }
-            cbuild_argv_append(&argv, def_arg);
-        }
-
-        for (int j = 0; j < t->define_count; ++j) {
-            char def_arg[512];
-            if (ctx->cc_kind == CBUILD_CC_MSVC) {
-                snprintf(def_arg, sizeof(def_arg), "/D%s", t->defines[j]);
-            } else {
-                snprintf(def_arg, sizeof(def_arg), "-D%s", t->defines[j]);
-            }
-            cbuild_argv_append(&argv, def_arg);
-        }
-
-        cbuild_argv_append(&argv, src_file);
+        cbuild__compile_argv(ctx, t, src_file, objname, NULL, &argv);
 
         /* Convert argv to command string for compatibility */
         char* cmd = cbuild_argv_to_cmdline(&argv);
@@ -3492,13 +3426,21 @@ void cbuild_command_add_dependency(cbuild_context_t* ctx, command_t* cmd, comman
 int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
     if (!cmd)
         return -1;
-    for (int i = 0; i < cmd->dep_count; ++i) {
-        int rc = cbuild_run_command(ctx, cmd->dependencies[i]);
-        if (rc != 0)
-            return rc;
-    }
     if (cmd->executed)
         return cmd->result;
+    if (cmd->in_progress) {
+        cbuild__set_error(ctx, "Circular command dependency involving '%s'", cmd->name);
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: circular command dependency involving %s", cmd->name);
+        return -1;
+    }
+    cmd->in_progress = 1;
+    for (int i = 0; i < cmd->dep_count; ++i) {
+        int rc = cbuild_run_command(ctx, cmd->dependencies[i]);
+        if (rc != 0) {
+            cmd->in_progress = 0;
+            return rc;
+        }
+    }
 
     cbuild__log_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
 
@@ -3525,6 +3467,7 @@ int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
     }
 
     cmd->executed = 1;
+    cmd->in_progress = 0;
     cmd->result = rc;
 
     if (rc != 0) {
@@ -3966,6 +3909,7 @@ void cbuild_set_output_file(cbuild_context_t* ctx, target_t* t, const char* path
     if (t->output_file) free(t->output_file);
     /* Normalize path separators for consistent path handling on Windows */
     t->output_file = cbuild__normalize_path(path);
+    t->output_file_explicit = 1;
 }
 
 void cbuild_set_soname(cbuild_context_t* ctx, target_t* t, const char* soname) {
@@ -4171,11 +4115,7 @@ static void dfs_command_func(cbuild_context_t* ctx, command_t* cmd, int* error_f
         return;
     if (cmd->executed)
         return;
-    for (int i = 0; i < cmd->dep_count; ++i) {
-        dfs_command_func(ctx, cmd->dependencies[i], error_flag_ptr);
-        if (*error_flag_ptr)
-            return;
-    }
+    /* cbuild_run_command runs dependencies first and rejects cycles */
     if (cbuild_run_command(ctx, cmd) != 0) {
         *error_flag_ptr = 1;
     }
@@ -4203,6 +4143,15 @@ static void dfs_build_func(cbuild_context_t* ctx, target_t* t, int* error_flag_p
     ctx->in_stack[ti] = 1;
 
     if (t->type == TARGET_FILE_DEP) {
+        /* Its commands only run when the file is stale, so unlike other targets
+         * the dependencies (e.g. a generator tool) come first. */
+        for (int di = 0; di < t->dep_count; ++di) {
+            dfs_build_func(ctx, t->dependencies[di], error_flag_ptr);
+            if (*error_flag_ptr) {
+                ctx->in_stack[ti] = 0;
+                return;
+            }
+        }
         build_target(ctx, t, error_flag_ptr);
         ctx->visited[ti] = 1;
         ctx->in_stack[ti] = 0;
@@ -4564,6 +4513,9 @@ static void cbuild__resolve_target_paths(cbuild_context_t* ctx) {
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
 
+        /* Every build pass starts here, so this is also where per-pass state resets. */
+        t->rebuilt = 0;
+
         /* Skip targets whose paths must not be derived from this context. */
         if (t->external || t->type == TARGET_COMMAND || t->type == TARGET_DUMMY || t->type == TARGET_FILE_DEP) {
             continue;
@@ -4578,14 +4530,17 @@ static void cbuild__resolve_target_paths(cbuild_context_t* ctx) {
             }
         }
 
-        /* Free old paths */
+        /* Recalculate obj_dir */
+        if (t->obj_dir) free(t->obj_dir);
+        t->obj_dir = NULL;
+        append_format(&t->obj_dir, "%s/obj_%s", output_dir, t->name);
+
+        /* A path chosen with cbuild_set_output_file is not ours to re-derive. */
+        if (t->output_file_explicit) continue;
+
         if (t->output_file) {
             free(t->output_file);
             t->output_file = NULL;
-        }
-        if (t->obj_dir) {
-            free(t->obj_dir);
-            t->obj_dir = NULL;
         }
 
         /* Recalculate output_file based on type */
@@ -4612,12 +4567,7 @@ static void cbuild__resolve_target_paths(cbuild_context_t* ctx) {
 #endif
         }
 
-        /* Recalculate obj_dir */
-        char *obj = NULL;
-        append_format(&obj, "%s/obj_%s", output_dir, t->name);
-
         t->output_file = out;
-        t->obj_dir = obj;
     }
 }
 
@@ -4645,10 +4595,22 @@ int cbuild_clean(cbuild_context_t* ctx) {
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
         if (t->external) continue; /* cleaned by its owning subproject */
-        if (t->obj_dir) remove_dir_recursive(ctx, t->obj_dir);
-        if (t->output_file) remove_file(ctx, t->output_file);
+        /* A file-dep target without commands names a file cbuild did not create. */
+        if (t->type == TARGET_FILE_DEP && t->cmd_count == 0) continue;
+        if (t->obj_dir) cbuild__clean_dir(ctx, t->obj_dir);
+        if (t->output_file) {
+            remove_file(ctx, t->output_file);
+            if (t->type != TARGET_FILE_DEP) {
+                char* link_sig = NULL;
+                if (append_format(&link_sig, "%s.link.sig", t->output_file) == 0) remove_file(ctx, link_sig);
+                free(link_sig);
+            }
+        }
     }
-    remove_dir_recursive(ctx, ctx->output_dir);
+    if (ctx->active_config && ctx->active_config->output_dir) {
+        cbuild__clean_dir(ctx, ctx->active_config->output_dir);
+    }
+    cbuild__clean_dir(ctx, ctx->output_dir);
     cbuild__log_status(ctx, 1, "Clean complete.");
     return 0;
 }
@@ -4929,12 +4891,6 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
         ctx->job_capacity = 0;
     }
 
-    if (ctx->generate_compile_commands) {
-        for (int i = 0; i < ctx->target_count; ++i) {
-            collect_compile_commands_for_target(ctx, ctx->targets[i]);
-        }
-    }
-
     int error_flag = 0;
     if (ctx->visited) free(ctx->visited);
     if (ctx->in_stack) free(ctx->in_stack);
@@ -4951,6 +4907,13 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
         free(ctx->visited);
         free(ctx->in_stack);
         return rc;
+    }
+
+    /* Collected after BEFORE_BUILD flags so the entries match what gets compiled */
+    if (ctx->generate_compile_commands) {
+        for (int i = 0; i < ctx->target_count; ++i) {
+            collect_compile_commands_for_target(ctx, ctx->targets[i]);
+        }
     }
 
     if (ctx->target_filter_count > 0) {
@@ -5408,26 +5371,96 @@ static void remove_file(cbuild_context_t* ctx, const char* path) {
     remove(path);
 }
 
+/* Classify a path without following links: 1 = real directory, -1 = symlink
+ * (or Windows reparse point), 0 = anything else, including a missing path. */
+static int cbuild__real_dir_kind(const char* path) {
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributes(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) return 0;
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) return -1;
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+#else
+    struct stat st;
+    if (lstat(path, &st) != 0) return 0;
+    if (S_ISLNK(st.st_mode)) return -1;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+#endif
+}
+
+/* Returns 1 when path is the current working directory or one of its ancestors
+ * (which includes the filesystem root), or when that cannot be ruled out. */
+static int cbuild__dir_contains_cwd(const char* path) {
+#ifdef _WIN32
+    char full[MAX_PATH];
+    char cwd[MAX_PATH];
+    if (!_fullpath(full, path, sizeof(full)) || !_getcwd(cwd, sizeof(cwd))) return 1;
+    size_t n = strlen(full);
+    while (n > 0 && (full[n - 1] == '\\' || full[n - 1] == '/')) n--;
+    if (_strnicmp(full, cwd, n) != 0) return 0;
+    return cwd[n] == '\0' || cwd[n] == '\\' || cwd[n] == '/';
+#else
+    struct stat st_target;
+    if (stat(path, &st_target) != 0) return 0;
+    char rel[PATH_MAX] = ".";
+    for (;;) {
+        struct stat st_cur, st_parent;
+        if (stat(rel, &st_cur) != 0) return 1;
+        if (st_cur.st_dev == st_target.st_dev && st_cur.st_ino == st_target.st_ino) return 1;
+        if (strlen(rel) + 4 > sizeof(rel)) return 1;
+        strcat(rel, "/..");
+        if (stat(rel, &st_parent) != 0) return 1;
+        if (st_parent.st_dev == st_cur.st_dev && st_parent.st_ino == st_cur.st_ino) return 0;
+    }
+#endif
+}
+
+/* Remove a directory tree that cbuild created. Symlinked directories are left
+ * alone, as is anything that would take the working directory with it. */
+static void cbuild__clean_dir(cbuild_context_t* ctx, const char* path) {
+    if (!path || !*path)
+        return;
+    int kind = cbuild__real_dir_kind(path);
+    if (kind == 0)
+        return;
+    if (kind < 0) {
+        cbuild__log(ctx, CBUILD_LOG_WARNING, "cbuild: not cleaning '%s': it is a symbolic link", path);
+        return;
+    }
+    if (cbuild__dir_contains_cwd(path)) {
+        cbuild__log(ctx, CBUILD_LOG_WARNING,
+                    "cbuild: not cleaning '%s': it contains the current working directory", path);
+        return;
+    }
+    remove_dir_recursive(ctx, path);
+}
+
+/* Links are removed, never followed, so nothing outside the tree is touched. */
 static void remove_dir_recursive(cbuild_context_t* ctx, const char* path) {
     if (!path || !*path)
         return;
+    if (cbuild__real_dir_kind(path) != 1)
+        return;
 #ifdef _WIN32
     WIN32_FIND_DATA ffd;
-    char pattern[MAX_PATH];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    char* pattern = cbuild__join_path(path, "*");
     HANDLE hFind = FindFirstFile(pattern, &ffd);
+    free(pattern);
     if (hFind == INVALID_HANDLE_VALUE)
         return;
     do {
         if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0)
             continue;
-        char full[MAX_PATH];
-        snprintf(full, sizeof(full), "%s\\%s", path, ffd.cFileName);
+        char* full = cbuild__join_path(path, ffd.cFileName);
         if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            remove_dir_recursive(ctx, full);
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                _rmdir(full);
+            } else {
+                remove_dir_recursive(ctx, full);
+            }
         } else {
             remove_file(ctx, full);
         }
+        free(full);
     } while (FindNextFile(hFind, &ffd));
     FindClose(hFind);
     _rmdir(path);
@@ -5436,19 +5469,19 @@ static void remove_dir_recursive(cbuild_context_t* ctx, const char* path) {
     if (!dir)
         return;
     struct dirent* entry;
-    char buf[1024];
     while ((entry = readdir(dir))) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
             continue;
-        snprintf(buf, sizeof(buf), "%s/%s", path, entry->d_name);
+        char* full = cbuild__join_path(path, entry->d_name);
         struct stat st;
-        if (!stat(buf, &st)) {
+        if (!lstat(full, &st)) {
             if (S_ISDIR(st.st_mode)) {
-                remove_dir_recursive(ctx, buf);
+                remove_dir_recursive(ctx, full);
             } else {
-                remove_file(ctx, buf);
+                remove_file(ctx, full);
             }
         }
+        free(full);
     }
     closedir(dir);
     rmdir(path);
@@ -5477,19 +5510,27 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
 
     if (t->type == TARGET_FILE_DEP) {
         int should_update = 0;
-        struct stat st_out;
-        time_t out_mtime = 0;
+        cbuild_mtime_t out_mtime = 0;
 
-        if (stat(t->output_file, &st_out) != 0) {
+        if (cbuild__mtime(t->output_file, &out_mtime) != 0) {
             should_update = 1;  // output missing
         } else {
-            out_mtime = st_out.st_mtime;
             for (int i = 0; i < t->sources_count; ++i) {
-                struct stat st_src;
-                if (stat(t->sources[i], &st_src) == 0 &&
-                    st_src.st_mtime > out_mtime) {
+                cbuild_mtime_t src_mtime;
+                if (cbuild__mtime(t->sources[i], &src_mtime) == 0 &&
+                    src_mtime > out_mtime) {
                     should_update = 1;  // source newer than output
                     break;
+                }
+            }
+            for (int i = 0; i < t->dep_count && !should_update; ++i) {
+                target_t* dep = t->dependencies[i];
+                cbuild_mtime_t dep_mtime;
+                /* dep->rebuilt catches a dependency rebuilt within the same
+                 * timestamp tick as the existing output */
+                if (dep->rebuilt || (dep->output_file && cbuild__mtime(dep->output_file, &dep_mtime) == 0 &&
+                                     dep_mtime > out_mtime)) {
+                    should_update = 1;  // dependency output newer than output
                 }
             }
         }
@@ -5507,6 +5548,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
                 return;
             }
             cbuild__log_step(ctx, "FILE_DEP", CBUILD_COLOR_GREEN, "%s (updated)", t->output_file);
+            t->rebuilt = 1;
         }
         return;
     }
@@ -5531,14 +5573,14 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
     }
 
     int needs_link = compiled_sources > 0;
-    struct stat st_out;
-    if (stat(t->output_file, &st_out) != 0) {
+    cbuild_mtime_t out_mtime;
+    if (cbuild__mtime(t->output_file, &out_mtime) != 0) {
         needs_link = 1;
     } else {
         for (int i = 0; i < obj_count; ++i) {
-            struct stat st_obj;
-            if (stat(obj_files[i], &st_obj) != 0 ||
-                st_obj.st_mtime > st_out.st_mtime) {
+            cbuild_mtime_t obj_mtime;
+            if (cbuild__mtime(obj_files[i], &obj_mtime) != 0 ||
+                obj_mtime > out_mtime) {
                 needs_link = 1;
                 break;
             }
@@ -5546,13 +5588,17 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         if (!needs_link) {
             for (int i = 0; i < t->dep_count; ++i) {
                 target_t* dep = t->dependencies[i];
+                /* A dependency rebuilt in this pass may share a timestamp tick
+                 * with the existing output, so do not rely on mtime alone. */
+                if (dep->rebuilt) {
+                    needs_link = 1;
+                    break;
+                }
                 if (dep->output_file) {
-                    struct stat st_dep;
-                    if (stat(dep->output_file, &st_dep) == 0) {
-                        if (st_dep.st_mtime > st_out.st_mtime) {
-                            needs_link = 1;
-                            break;
-                        }
+                    cbuild_mtime_t dep_mtime;
+                    if (cbuild__mtime(dep->output_file, &dep_mtime) == 0 && dep_mtime > out_mtime) {
+                        needs_link = 1;
+                        break;
                     }
                 }
             }
@@ -5935,6 +5981,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
             *error_flag = 1;
             goto cleanup;
         } else {
+            t->rebuilt = 1;
             /* On successful link, write signature of the link command */
             char* link_sig = NULL;
             cbuild_argv_t largv;
