@@ -159,6 +159,10 @@ try {
     $subcommand = Invoke-Capture .\cbuild.exe @("--feature", "--run=app") "subcommand.log"
     if ($subcommand -notmatch "feature=1") { throw "Subcommand did not run test_app" }
 
+    # A bare subcommand name is shorthand for --run=NAME.
+    $positional = Invoke-Capture .\cbuild.exe @("--feature", "app") "positional-subcommand.log"
+    if ($positional -notmatch "feature=1") { throw "Positional subcommand did not run test_app" }
+
     Start-Sleep -Seconds 2
     (Get-Item inputs\schema.txt).LastWriteTime = Get-Date
     $generated = Invoke-Capture .\cbuild.exe @("--target=test_app") "generated-rebuild.log"

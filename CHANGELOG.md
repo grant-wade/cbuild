@@ -4,6 +4,10 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 
 ## Unreleased
 
+### Added
+
+- A registered subcommand can be run by name: `./cbuild run` is shorthand for `./cbuild --run=run`.
+
 ### Changed
 
 - The implementation now lives in `src/` as separate C source files. `cbuild.h` is generated from them by `tools/amalgamate.c`, kept current by a pre-commit hook, and verified in CI. The public API and behaviour are unchanged.

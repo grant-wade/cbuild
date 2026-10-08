@@ -57,6 +57,7 @@ Typical invocations:
     $ ./cbuild --clean                # cleans build outputs
     $ ./cbuild --version              # prints CBUILD_VERSION
     $ ./cbuild --run bar              # builds bar's target (if any) and runs the subcommand
+    $ ./cbuild bar                    # shorthand for --run bar
     $ ./cbuild --list                 # lists targets
     $ ./cbuild --graph                # prints the build graph
     $ ./cbuild --deps=mytarget        # shows reverse dependencies of 'mytarget'
@@ -2224,9 +2225,20 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
 
     cbuild__resolve_target_paths(ctx);
 
+    /* A single bare argument naming a registered subcommand is shorthand for --run=NAME. */
+    if (argc == 2 && !ctx->run_subcmd) {
+        for (int i = 0; i < ctx->subcommand_count; i++) {
+            if (strcmp(ctx->subcommands[i]->name, argv[1]) == 0) {
+                ctx->run_subcmd = argv[1];
+                argc = 1;
+                break;
+            }
+        }
+    }
+
     if (argc > 1) {
         cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
-        cbuild__log(ctx, CBUILD_LOG_INFO, "hint: use flags (try --help)");
+        cbuild__log(ctx, CBUILD_LOG_INFO, "hint: use flags or a subcommand name (try --help)");
         return 1;
     }
 

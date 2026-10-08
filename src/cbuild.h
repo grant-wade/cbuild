@@ -56,6 +56,7 @@ Typical invocations:
     $ ./cbuild --clean                # cleans build outputs
     $ ./cbuild --version              # prints CBUILD_VERSION
     $ ./cbuild --run bar              # builds bar's target (if any) and runs the subcommand
+    $ ./cbuild bar                    # shorthand for --run bar
     $ ./cbuild --list                 # lists targets
     $ ./cbuild --graph                # prints the build graph
     $ ./cbuild --deps=mytarget        # shows reverse dependencies of 'mytarget'

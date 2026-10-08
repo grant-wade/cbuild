@@ -215,7 +215,7 @@ void cbuild_register_subcommand(cbuild_context_t *ctx, const char *name,
                                 void *user_data);
 ```
 
-A registered subcommand can use a command line, a callback, or both, and can optionally require a target to be built first.
+A registered subcommand can use a command line, a callback, or both, and can optionally require a target to be built first. Run it with `--run=NAME`, `-r NAME`, or just its name as the only positional argument (`./cbuild NAME`).
 
 ## Custom flags
 

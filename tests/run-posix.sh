@@ -119,6 +119,15 @@ grep -q "feature=1" feature-output.log
 ./cbuild --feature --run=app > subcommand.log
 grep -q "feature=1" subcommand.log
 
+# A bare subcommand name is shorthand for --run=NAME; anything else is rejected.
+./cbuild --feature app > positional-subcommand.log
+grep -q "feature=1" positional-subcommand.log
+if ./cbuild no-such-subcommand > positional-unknown.log 2>&1; then
+    echo "Unknown positional argument was unexpectedly accepted" >&2
+    exit 1
+fi
+grep -q "unexpected argument" positional-unknown.log
+
 # A newer generated-file input must rerun generation and rebuild its consumer.
 sleep 1
 touch inputs/schema.txt

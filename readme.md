@@ -4,7 +4,7 @@
 
 **Current version: `v0.1.1`**
 
-CBuild is a cross-platform, single-header build system for C projects. Build descriptions are ordinary C programs, so they can use functions, loops, platform checks, and existing C libraries without a separate configuration language or runtime.
+A build system for C that is just a C header. You describe your build in a `build.c`, compile it with the compiler you already have, and run it. No Makefile dialect, no configuration language, nothing else to install.
 
 ```c
 #define CBUILD_IMPLEMENTATION
@@ -32,74 +32,57 @@ int main(int argc, char **argv) {
 }
 ```
 
-## Features
+Because the build is a real program, anything C can do is fair game: loops over source lists, `#ifdef` for platform quirks, helper functions, your own libraries.
 
-- Executable, static-library, shared-library, file-dependency, and dummy targets
-- Incremental builds using timestamps, generated header dependencies, and compile/link signatures
-- Parallel compilation with automatic CPU detection or `-j` selection
-- GCC, Clang, and MSVC support on Linux, macOS, and Windows
-- Per-context and per-target compiler flags, linker flags, definitions, and output paths
-- Structured Debug, Release, WebAssembly, and custom build configurations
-- Wildcards, including recursive `**` source patterns
-- Shell, argv-based, and C callback commands with dependencies and pre/post target hooks
-- Named subcommands and custom command-line flags
-- Subprojects with manifest-based target discovery
-- `compile_commands.json` generation
-- Build graph inspection, target selection, and reverse-dependency inspection
-- Self-rebuilding build programs
-- Context-based API with no global build state, suitable for embedding
+## Try it
 
-## Getting started
-
-Download `cbuild.h` from the [latest GitHub release](https://github.com/grant-wade/cbuild/releases/latest), or copy it from this repository. Create `build.c` using the example above and define `CBUILD_IMPLEMENTATION` in exactly one translation unit.
-
-The public version macros can be used at compile time or displayed by tools:
-
-```c
-printf("CBuild %s\n", CBUILD_VERSION);
-/* CBUILD_VERSION_MAJOR, CBUILD_VERSION_MINOR, CBUILD_VERSION_PATCH */
-```
-
-Compile the build program:
+Grab `cbuild.h` from the [latest release](https://github.com/grant-wade/cbuild/releases/latest) (or copy it out of this repo), drop it next to a `build.c` like the one above, and:
 
 ```sh
 cc -o cbuild build.c
-```
-
-With MSVC from a Developer Command Prompt:
-
-```bat
-cl /nologo /Fe:cbuild.exe build.c
-```
-
-Then run it:
-
-```sh
 ./cbuild
 ```
 
-The `CBUILD_SELF_REBUILD` call recompiles and restarts the build program when any listed source changes. Put the primary build source first.
+On Windows, from a Developer Command Prompt:
 
-## Command-line interface
+```bat
+cl /nologo /Fe:cbuild.exe build.c
+cbuild.exe
+```
 
-| Option | Description |
-| --- | --- |
-| `-h`, `--help` | Show built-in and project-defined options |
-| `--version` | Print `CBUILD_VERSION` and exit |
-| `-v`, `--verbose` | Show full compiler and linker commands |
-| `-j N`, `--jobs=N` | Set the number of parallel compile jobs |
-| `-t NAME`, `--target=NAME` | Build only a target and its dependencies |
-| `--compile-commands` | Write `compile_commands.json` to the active output directory |
-| `-l`, `--list` | List targets and exit |
-| `--graph` | Print the build graph and exit |
-| `--deps=NAME` | Print targets that consume `NAME` and exit |
-| `--manifest` | Print the machine-readable target manifest used by subprojects |
-| `--clean` | Remove outputs and clean registered subprojects |
-| `-r NAME`, `--run=NAME` | Build and execute a registered subcommand |
+You only compile it by hand once. `CBUILD_SELF_REBUILD` notices when `build.c` (or anything else you list, primary source first) has changed, then recompiles and restarts itself.
 
-CBuild uses options rather than the positional commands supported by older releases. For example, use `./cbuild --clean`, not `./cbuild clean`.
+## What you get
 
-## Targets and dependencies
+- **Incremental, parallel builds.** Only what changed gets rebuilt, based on timestamps, header dependencies, and the exact compile and link commands, so changing a flag rebuilds what it should. Compiles run across all your cores, or as many as you pass to `-j`.
+- **GCC, Clang, and MSVC** on Linux, macOS, and Windows, with output names that follow each platform (`libfoo.a` vs `foo.lib`, `.so` vs `.dylib` vs `.dll`).
+- **Executables, static and shared libraries**, plus generated files and custom commands that slot into the same dependency graph.
+- **Build configurations** for Debug, Release, WebAssembly, or your own, written once instead of per compiler.
+- **Subprojects**: link against a target from another CBuild project.
+- **`compile_commands.json`** for clangd and friends.
+- **No global state.** Everything hangs off a context, so you can also embed CBuild as a library and skip the CLI.
+
+## Running your build
+
+```sh
+./cbuild                      # build everything
+./cbuild -t app               # build one target and what it needs
+./cbuild -j 8                 # choose the number of parallel jobs
+./cbuild -v                   # show the full compiler and linker commands
+./cbuild --clean              # remove outputs, including subprojects'
+./cbuild NAME                 # build and run a subcommand you registered (same as --run=NAME)
+./cbuild --compile-commands   # write compile_commands.json
+./cbuild --list               # list targets
+./cbuild --graph              # print the build graph
+./cbuild --deps=NAME          # show what depends on NAME
+./cbuild --help               # everything, including flags your build adds
+```
+
+The only bare word CBuild accepts is the name of a subcommand you registered. Everything built in is an option: it's `./cbuild --clean`, not `./cbuild clean`.
+
+## A quick tour
+
+### Targets
 
 ```c
 target_t *core = cbuild_static_library(ctx, "core");
@@ -109,23 +92,15 @@ CBUILD_DEFINES(ctx, core, "PROJECT_INTERNAL", "HAVE_FEATURE=1");
 
 target_t *app = cbuild_executable(ctx, "app");
 cbuild_add_source(ctx, app, "src/main.c");
-cbuild_add_link_target(ctx, app, core);
-cbuild_add_link_library(ctx, app, "m");
+cbuild_add_link_target(ctx, app, core);   /* depend on and link our own library */
+cbuild_add_link_library(ctx, app, "m");   /* link a system library */
 ```
 
-`cbuild_add_link_target` adds both a graph dependency and the target's library output to the dependent target's link command. Use `cbuild_add_link_library` for a system or externally supplied library.
+Wildcards work, including recursive `**`. If you don't like the default output name, `cbuild_set_output_file` overrides it.
 
-Target output names are platform-aware:
+### Configurations
 
-- Executable: `build/name` or `build/name.exe`
-- Static library: `build/libname.a` or `build/name.lib`
-- Shared library: `build/libname.so`, `build/libname.dylib`, or `build/name.dll`
-
-Override them with `cbuild_set_output_file` when necessary.
-
-## Build configurations
-
-Configurations collect portable compiler settings and can be active globally or assigned to individual targets.
+A configuration is a bundle of compiler settings described portably, so you say "optimise, with debug info" and CBuild picks the right flags for GCC, Clang, or MSVC.
 
 ```c
 config_t *release = cbuild_config_default_release(ctx);
@@ -137,18 +112,15 @@ cbuild_config_set_opt(ctx, tools, 0);
 cbuild_config_set_debug(ctx, tools, 1);
 cbuild_config_set_warnings(ctx, tools, 2);
 cbuild_config_set_output_dir(ctx, tools, "build/tools");
-cbuild_config_add_define(ctx, tools, "TOOL_BUILD=1");
 
-cbuild_target_set_config(ctx, generator, tools);
+cbuild_target_set_config(ctx, generator, tools);   /* just this target */
 ```
 
-Configuration controls include optimization, debug information, LTO, PIC, warnings, language standard, runtime selection, freestanding mode, sanitizers, compiler/linker selection, flags, definitions, includes, library directories, and linked libraries.
+There are also knobs for LTO, PIC, sanitizers, the runtime, freestanding mode, and the compiler and linker themselves. If all you need is the basics, `cbuild_set_build_type(ctx, "Debug")` or `"Release"` does it in one line.
 
-For simple projects, `cbuild_set_build_type(ctx, "Debug")` and `cbuild_set_build_type(ctx, "Release")` remain available.
+### Commands and generated files
 
-## Commands and generated files
-
-Commands may use a shell string, an argv array, or a C callback:
+Commands can be a shell string, an argv array, or a C callback, and can run before or after a target:
 
 ```c
 command_t *generate = cbuild_command(
@@ -159,7 +131,7 @@ cbuild_target_add_post_command(ctx, app, package);   /* after target */
 cbuild_command_add_dependency(ctx, package, generate);
 ```
 
-For generated files, use a file-dependency target so generation runs only when the output is absent or one of its inputs is newer:
+For a file you generate, use a file-dependency target. It reruns only when the output is missing or an input is newer:
 
 ```c
 target_t *generated = cbuild_file_dep_target(
@@ -169,18 +141,26 @@ cbuild_target_add_command(ctx, generated, generate);
 cbuild_add_link_target(ctx, app, generated);
 ```
 
-Register a named action with an optional build target:
+And for the things you'd otherwise put in a `run` or `test` script, register a subcommand and call it with `./cbuild run`:
 
 ```c
-cbuild_register_subcommand(
-    ctx, "run", app, "./build/app", NULL, NULL);
+cbuild_register_subcommand(ctx, "run", app, "./build/app", NULL, NULL);
 ```
 
-Invoke it with `./cbuild --run=run`.
+### Your own flags
 
-## Subprojects
+```c
+int enable_tests = 0;
+cbuild_register_flag_bool(
+    ctx, "tests", 0, CBUILD_FLAG_PRE,
+    "Build test targets", &enable_tests);
+```
 
-A subproject is another CBuild project with its own compiled build program:
+That gives you `./cbuild --tests`, and it shows up in `--help`. Integer, string, and callback flags work the same way.
+
+### Subprojects
+
+A subproject is another CBuild project with its own build program:
 
 ```c
 subproject_t *math_project =
@@ -190,11 +170,11 @@ target_t *math =
 cbuild_add_link_target(ctx, app, math);
 ```
 
-CBuild enters the subproject directory, requests its `--manifest`, builds it on demand, and links the selected output. The subproject build executable must already exist; see [`example/build.c`](example/build.c) for a small bootstrap command.
+CBuild asks the subproject what it offers, builds it when needed, and links the result. The subproject's build program has to exist first; [`example/build.c`](example/build.c) shows a small command that bootstraps it.
 
-## Programmatic and embedded use
+### Without the CLI
 
-The CLI is optional:
+`cbuild_run` is a convenience. You can drive everything yourself:
 
 ```c
 int result = cbuild_build(ctx, NULL);       /* all targets */
@@ -202,36 +182,18 @@ int result = cbuild_build(ctx, "app");      /* one target */
 int clean_result = cbuild_clean(ctx);
 ```
 
-Use `cbuild_configure_from_argv` to process common options without running a build. Errors are available through `cbuild_get_last_error`, and output can be routed through `cbuild_set_logger`.
+Errors come back through `cbuild_get_last_error`, and `cbuild_set_logger` sends output wherever you want it.
 
-A context owns its targets, commands, configurations, and strings. Release it with `cbuild_context_free`. `cbuild_reset` clears a context for reuse; `cbuild_teardown` releases its internal state without freeing the context allocation.
+## Going deeper
 
-## Custom flags
+- [`docs/api.md`](docs/api.md) is the full API reference.
+- [`example/`](example/) is a small project that links against a subproject.
+- [`tests/`](tests/) explains the test suite and how to run it.
+- [`CHANGELOG.md`](CHANGELOG.md) has what changed in each version.
 
-Projects can extend `--help` and bind options directly:
+## Hacking on CBuild
 
-```c
-int enable_tests = 0;
-cbuild_register_flag_bool(
-    ctx, "tests", 0, CBUILD_FLAG_PRE,
-    "Build test targets", &enable_tests);
-```
-
-Integer, string, and callback-based handlers are also available. Flag phases allow handlers before the build, immediately before building, or after a successful build.
-
-## Documentation and examples
-
-- [`cbuild.h`](cbuild.h) contains the public declarations and implementation notes.
-- [`src/`](src/) holds the sources that `cbuild.h` is generated from.
-- [`docs/api.md`](docs/api.md) summarizes the public API.
-- [`docs/releasing.md`](docs/releasing.md) documents the automated release process.
-- [`example/`](example/) demonstrates a main project linked to a CBuild subproject.
-- [`tests/`](tests/) documents and exercises the cross-platform test suite.
-- [`CHANGELOG.md`](CHANGELOG.md) records notable changes by version.
-
-## Development
-
-`cbuild.h` is generated. The code lives in [`src/`](src/) as ordinary C files: `src/cbuild.h` is the public API, `src/cbuild_internal.h` holds private types and shared helpers, and each `.c` file compiles on its own. [`tools/amalgamate.c`](tools/amalgamate.c) combines them into the single header:
+`cbuild.h` is a generated file, so don't edit it. The real code is in [`src/`](src/) as ordinary C files, and [`tools/amalgamate.c`](tools/amalgamate.c) stitches them into the single header:
 
 ```sh
 cc tools/amalgamate.c -o amalgamate
@@ -239,21 +201,26 @@ cc tools/amalgamate.c -o amalgamate
 ./amalgamate --check    # exit 1 if cbuild.h is out of date
 ```
 
-Edit the files in `src/`, never `cbuild.h` directly. Enable the pre-commit hook once per clone so the header is regenerated and staged on every commit:
+You shouldn't need to run that by hand. Turn on the pre-commit hook once per clone and it regenerates and stages `cbuild.h` on every commit:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-The hook needs a C compiler on `PATH` (or `CC`). CI fails when the committed `cbuild.h` does not match `src/`.
+The hook needs a C compiler on your `PATH` (or in `CC`). If a stale header slips through anyway, CI will catch it.
 
-A helper used by more than one source file is declared in `src/cbuild_internal.h` with `CBUILD_INTERNAL` in place of `static`; it stays `static` in the generated header. New `.c` and `.h` files in `src/` are picked up automatically.
+A few things worth knowing when you're in `src/`:
+
+- `src/cbuild.h` is the public API and `src/cbuild_internal.h` holds the private types and shared helpers.
+- A helper used by more than one file is declared in `cbuild_internal.h` with `CBUILD_INTERNAL` instead of `static`. It still ends up `static` in the generated header.
+- New `.c` and `.h` files in `src/` are picked up automatically.
+
+Run the tests with `tests/run-posix.sh` (or `tests/run-windows.ps1`). Releases are automatic and described in [`docs/releasing.md`](docs/releasing.md).
 
 ## License
 
-CBuild is distributed under the [BSD 3-Clause License](LICENSE).
+[BSD 3-Clause](LICENSE).
 
 ## Acknowledgments
 
-- [nob.h](https://github.com/tsoding/nob.h)
-- [tup](https://github.com/gittup/tup)
+CBuild owes ideas to [nob.h](https://github.com/tsoding/nob.h) and [tup](https://github.com/gittup/tup).
