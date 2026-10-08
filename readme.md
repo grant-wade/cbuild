@@ -2,7 +2,7 @@
 
 [![CI and release](https://github.com/grant-wade/cbuild/actions/workflows/ci.yml/badge.svg)](https://github.com/grant-wade/cbuild/actions/workflows/ci.yml)
 
-**Current version: `v0.1.1`**
+**Current version: `v0.1.2`**
 
 A build system for C that is just a C header. You describe your build in a `build.c`, compile it with the compiler you already have, and run it. No Makefile dialect, no configuration language, nothing else to install.
 

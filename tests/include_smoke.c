@@ -1,6 +1,6 @@
 #include "../cbuild.h"
 
-#if CBUILD_VERSION_MAJOR != 0 || CBUILD_VERSION_MINOR != 1 || CBUILD_VERSION_PATCH != 1
+#if CBUILD_VERSION_MAJOR != 0 || CBUILD_VERSION_MINOR != 1 || CBUILD_VERSION_PATCH != 2
 #error "Unexpected CBuild version"
 #endif
 

@@ -7,10 +7,10 @@ All build state is owned by a `cbuild_context_t`. Unless noted otherwise, functi
 ## Version
 
 ```c
-#define CBUILD_VERSION "v0.1.1"
+#define CBUILD_VERSION "v0.1.2"
 #define CBUILD_VERSION_MAJOR 0
 #define CBUILD_VERSION_MINOR 1
-#define CBUILD_VERSION_PATCH 1
+#define CBUILD_VERSION_PATCH 2
 ```
 
 Release tags exactly match `CBUILD_VERSION`. The numeric macros are suitable for preprocessor checks.

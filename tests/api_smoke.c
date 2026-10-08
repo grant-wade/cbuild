@@ -31,10 +31,10 @@ static void count_logger(void *user_data, cbuild_log_level_t level,
 }
 
 int main(void) {
-    assert(strcmp(CBUILD_VERSION, "v0.1.1") == 0);
+    assert(strcmp(CBUILD_VERSION, "v0.1.2") == 0);
     assert(CBUILD_VERSION_MAJOR == 0);
     assert(CBUILD_VERSION_MINOR == 1);
-    assert(CBUILD_VERSION_PATCH == 1);
+    assert(CBUILD_VERSION_PATCH == 2);
 
     cbuild_context_t *ctx = cbuild_context_new();
     assert(ctx != NULL);

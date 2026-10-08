@@ -61,7 +61,7 @@ cd "$ROOT/tests/project"
 $CC $CFLAGS build.c -o cbuild
 
 ./cbuild --version > build-version.log
-grep -qx "v0.1.1" build-version.log
+grep -qx "v0.1.2" build-version.log
 ./cbuild --help > build-help.log
 ./cbuild --list > build-list.log
 grep -q "test_app" build-list.log

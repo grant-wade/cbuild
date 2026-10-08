@@ -2,7 +2,7 @@
 
 All notable changes to CBuild are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [v0.1.2] - 2026-10-07
 
 ### Added
 
@@ -65,5 +65,6 @@ Initial versioned release of the modern CBuild implementation.
 - Windows subproject commands now use PowerShell-compatible directory changes and invocation.
 - MSVC dependency tracking preserves header paths containing spaces, preventing perpetual no-op recompiles.
 
+[v0.1.2]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.2
 [v0.1.1]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/grant-wade/cbuild/releases/tag/v0.1.0

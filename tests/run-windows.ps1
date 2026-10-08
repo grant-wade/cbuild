@@ -95,8 +95,8 @@ try {
 
     $version = Invoke-Capture .\cbuild.exe @("--version") "build-version.log"
     $versionLines = @($version -split "\r?\n" | ForEach-Object { $_.Trim() })
-    if ($versionLines -notcontains "v0.1.1") {
-        throw "Expected v0.1.1 in --version output: $version"
+    if ($versionLines -notcontains "v0.1.2") {
+        throw "Expected v0.1.2 in --version output: $version"
     }
     $null = Invoke-Capture .\cbuild.exe @("--help") "build-help.log"
     $list = Invoke-Capture .\cbuild.exe @("--list") "build-list.log"
