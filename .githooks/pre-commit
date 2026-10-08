@@ -1,0 +1,27 @@
+#!/bin/sh
+# Regenerate the single-header cbuild.h from src/ and stage it, so the committed
+# header always matches the sources. Enable once per clone with:
+#     git config core.hooksPath .githooks
+# CI runs `amalgamate --check`, which catches commits made without this hook.
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+cc=${CC:-}
+if [ -z "$cc" ]; then
+    for candidate in cc gcc clang; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            cc=$candidate
+            break
+        fi
+    done
+fi
+if [ -z "$cc" ]; then
+    echo "pre-commit: no C compiler found to build tools/amalgamate.c (set CC)." >&2
+    exit 1
+fi
+
+mkdir -p .cache
+"$cc" tools/amalgamate.c -o .cache/amalgamate
+./.cache/amalgamate
+git add cbuild.h

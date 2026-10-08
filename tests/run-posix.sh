@@ -9,6 +9,8 @@ CXXFLAGS=${CXXFLAGS:--std=c++11 -Wall -Wextra -Wpedantic -Werror}
 
 cleanup() {
     rm -f "$ROOT/tests/api_smoke" \
+          "$ROOT/tests/api_smoke_split" \
+          "$ROOT/tests/amalgamate" \
           "$ROOT/tests/include_smoke.o" \
           "$ROOT/tests/include_smoke_cpp.o" \
           "$ROOT/tests/project/cbuild" \
@@ -17,6 +19,7 @@ cleanup() {
           "$ROOT/tests/project"/*.log \
           "$ROOT/example"/*.log
     rm -rf "$ROOT/tests/api-build" \
+           "$ROOT/tests/split-build" \
            "$ROOT/tests/project/build" \
            "$ROOT/example/build" \
            "$ROOT/example/lib/build"
@@ -25,6 +28,11 @@ trap cleanup EXIT INT TERM
 cleanup
 
 cd "$ROOT"
+
+# The committed single header must match what tools/amalgamate.c generates from src/.
+# shellcheck disable=SC2086
+$CC $CFLAGS tools/amalgamate.c -o tests/amalgamate
+./tests/amalgamate --check
 
 # Public declarations must compile cleanly from both C and C++.
 # shellcheck disable=SC2086
@@ -37,6 +45,16 @@ $CXX $CXXFLAGS -c tests/include_smoke.cpp -o tests/include_smoke_cpp.o
 # shellcheck disable=SC2086
 $CC $CFLAGS tests/api_smoke.c -o tests/api_smoke
 ./tests/api_smoke
+
+# The files in src/ must also build as ordinary separate translation units.
+mkdir -p tests/split-build
+for src in src/*.c; do
+    # shellcheck disable=SC2086
+    $CC $CFLAGS -c "$src" -o "tests/split-build/$(basename "$src" .c).o"
+done
+# shellcheck disable=SC2086
+$CC $CFLAGS -DCBUILD_TEST_SPLIT_SOURCES tests/api_smoke.c tests/split-build/*.o -o tests/api_smoke_split
+./tests/api_smoke_split
 
 cd "$ROOT/tests/project"
 # shellcheck disable=SC2086

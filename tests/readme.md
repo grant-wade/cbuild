@@ -4,6 +4,8 @@ The test suite is intentionally toolchain-free beyond a C/C++ compiler, Python 3
 
 ## Coverage
 
+- The committed `cbuild.h` matches what `tools/amalgamate.c` generates from `src/`
+- `src/` compiled as separate translation units and linked against the API smoke test
 - Declaration-only inclusion from C and C++
 - Public version macros
 - Context lifecycle, reset, logging, user data, and error reporting

@@ -30,6 +30,9 @@ function Remove-TestArtifacts {
     Remove-Item -Force -ErrorAction SilentlyContinue `
         "$Root\tests\api_smoke.exe", `
         "$Root\tests\api_smoke.obj", `
+        "$Root\tests\api_smoke_split.exe", `
+        "$Root\tests\amalgamate.exe", `
+        "$Root\tests\amalgamate.obj", `
         "$Root\tests\include_smoke.obj", `
         "$Root\tests\include_smoke_cpp.obj", `
         "$Root\tests\project\cbuild.exe", `
@@ -45,6 +48,7 @@ function Remove-TestArtifacts {
         "$Root\tests\project\*.log", "$Root\example\*.log"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
         "$Root\tests\api-build", `
+        "$Root\tests\split-build", `
         "$Root\tests\project\build", `
         "$Root\example\build", `
         "$Root\example\lib\build"
@@ -53,6 +57,13 @@ function Remove-TestArtifacts {
 try {
     Remove-TestArtifacts
     Set-Location $Root
+
+    # The committed single header must match what tools/amalgamate.c generates from src/.
+    & $CC /nologo /std:c11 /W4 `
+        tools\amalgamate.c /Fo:tests\amalgamate.obj /Fe:tests\amalgamate.exe
+    Assert-LastExitCode "Amalgamation tool compile"
+    & .\tests\amalgamate.exe --check
+    Assert-LastExitCode "Amalgamated header freshness check"
 
     & $CC /nologo /std:c11 /W4 /D_CRT_SECURE_NO_WARNINGS `
         /c tests\include_smoke.c /Fo:tests\include_smoke.obj
@@ -67,6 +78,15 @@ try {
     Assert-LastExitCode "API smoke compile"
     & .\tests\api_smoke.exe
     Assert-LastExitCode "API smoke test"
+
+    # The files in src/ must also build as ordinary separate translation units.
+    New-Item -ItemType Directory -Force "$Root\tests\split-build" | Out-Null
+    $splitSources = @(Get-ChildItem "$Root\src\*.c" | ForEach-Object { $_.FullName })
+    & $CC /nologo /std:c11 /W4 /D_CRT_SECURE_NO_WARNINGS /DCBUILD_TEST_SPLIT_SOURCES `
+        tests\api_smoke.c @splitSources /Fotests\split-build\ /Fe:tests\api_smoke_split.exe
+    Assert-LastExitCode "Split-source API smoke compile"
+    & .\tests\api_smoke_split.exe
+    Assert-LastExitCode "Split-source API smoke test"
 
     Set-Location "$Root\tests\project"
     & $CC /nologo /std:c11 /W4 /D_CRT_SECURE_NO_WARNINGS `

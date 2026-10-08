@@ -2,6 +2,12 @@
 
 All notable changes to CBuild are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- The implementation now lives in `src/` as separate C source files. `cbuild.h` is generated from them by `tools/amalgamate.c`, kept current by a pre-commit hook, and verified in CI. The public API and behaviour are unchanged.
+
 ## [v0.1.1] - 2026-10-07
 
 Correctness release: CBuild should not skip a necessary rebuild, rebuild unchanged sources, or delete files it did not produce.

@@ -2,11 +2,11 @@
 
 CBuild releases are automatic and version-driven. After a successful push to `main`, the workflow checks whether a GitHub Release matching `CBUILD_VERSION` already exists. It publishes only unreleased header versions. Ordinary code and documentation changes do not create another release once the current version has been published.
 
-A release is published only after the Linux GCC, Linux Clang, macOS Clang, Linux sanitizer, and Windows MSVC jobs all pass.
+A release is published only after the amalgamation check and the Linux GCC, Linux Clang, macOS Clang, Linux sanitizer, and Windows MSVC jobs all pass.
 
 ## Version sources
 
-The canonical public version is declared in `cbuild.h`:
+The canonical public version is declared in `src/cbuild.h` and carried into the generated `cbuild.h`, which is what the workflow reads:
 
 ```c
 #define CBUILD_VERSION "v0.1.1"
@@ -19,7 +19,7 @@ The workflow requires semantic version format with a leading `v`, and verifies t
 
 ## Release checklist
 
-1. Update all four version macros in `cbuild.h`.
+1. Update all four version macros in `src/cbuild.h` and regenerate `cbuild.h` (the pre-commit hook does this; see the README's Development section).
 2. Update version assertions in `tests/api_smoke.c`, `tests/include_smoke.c`, `tests/include_smoke.cpp`, `tests/run-posix.sh`, and `tests/run-windows.ps1`.
 3. Update the current version shown in `readme.md`.
 4. Add the new version and release notes to `CHANGELOG.md`.

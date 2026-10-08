@@ -1,5 +1,11 @@
+/* By default this exercises the shipped single header. The suite also builds
+   it with CBUILD_TEST_SPLIT_SOURCES and links the separately compiled src/ files. */
+#ifdef CBUILD_TEST_SPLIT_SOURCES
+#include "../src/cbuild.h"
+#else
 #define CBUILD_IMPLEMENTATION
 #include "../cbuild.h"
+#endif
 
 #include <assert.h>
 #include <stdio.h>

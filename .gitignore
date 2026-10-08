@@ -15,3 +15,8 @@ compile_commands.json
 /tests/api_smoke.exe
 /tests/regress work/
 .DS_Store
+/tests/api_smoke_split
+/tests/api_smoke_split.exe
+/tests/amalgamate
+/tests/amalgamate.exe
+/tests/split-build/

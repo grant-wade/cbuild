@@ -222,11 +222,32 @@ Integer, string, and callback-based handlers are also available. Flag phases all
 ## Documentation and examples
 
 - [`cbuild.h`](cbuild.h) contains the public declarations and implementation notes.
+- [`src/`](src/) holds the sources that `cbuild.h` is generated from.
 - [`docs/api.md`](docs/api.md) summarizes the public API.
 - [`docs/releasing.md`](docs/releasing.md) documents the automated release process.
 - [`example/`](example/) demonstrates a main project linked to a CBuild subproject.
 - [`tests/`](tests/) documents and exercises the cross-platform test suite.
 - [`CHANGELOG.md`](CHANGELOG.md) records notable changes by version.
+
+## Development
+
+`cbuild.h` is generated. The code lives in [`src/`](src/) as ordinary C files: `src/cbuild.h` is the public API, `src/cbuild_internal.h` holds private types and shared helpers, and each `.c` file compiles on its own. [`tools/amalgamate.c`](tools/amalgamate.c) combines them into the single header:
+
+```sh
+cc tools/amalgamate.c -o amalgamate
+./amalgamate            # rewrite cbuild.h from src/
+./amalgamate --check    # exit 1 if cbuild.h is out of date
+```
+
+Edit the files in `src/`, never `cbuild.h` directly. Enable the pre-commit hook once per clone so the header is regenerated and staged on every commit:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The hook needs a C compiler on `PATH` (or `CC`). CI fails when the committed `cbuild.h` does not match `src/`.
+
+A helper used by more than one source file is declared in `src/cbuild_internal.h` with `CBUILD_INTERNAL` in place of `static`; it stays `static` in the generated header. New `.c` and `.h` files in `src/` are picked up automatically.
 
 ## License
 
