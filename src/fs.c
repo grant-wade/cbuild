@@ -150,9 +150,13 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
     *files = NULL;
     *file_count = 0;
 
-    const char* last_slash = strrchr(pattern, '/');
-    const char* last_backslash = strrchr(pattern, '\\');
-    const char* separator = last_slash ? last_slash : last_backslash;
+    /* Search from the deepest directory named before the first wildcard, so
+     * wildcards in directory names, recursive ones included, can match. */
+    const char* wild = strpbrk(pattern, "*?");
+    const char* separator = NULL;
+    for (const char* p = pattern; *p && (!wild || p < wild); ++p) {
+        if (*p == '/' || *p == '\\') separator = p;
+    }
 
     if (!separator) {
         strcpy(dir_path, ".");
@@ -171,6 +175,11 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
 
     int result = cbuild_expand_wildcard_recursive(dir_path, base_pattern, files,
                                                   file_count, &capacity);
+
+    /* Directory order varies between machines and runs; sorting keeps builds reproducible. */
+    if (result == 0 && *file_count > 1) {
+        qsort(*files, *file_count, sizeof(char*), cbuild__strcmp_wrapper);
+    }
 
     if (result != 0 && *files) {
         for (int i = 0; i < *file_count; i++) {
@@ -209,16 +218,15 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
                                      char*** files, int* file_count,
                                      int* capacity) {
     int recursive_search = 0;
-    char next_pattern[PATH_MAX] = { 0 };
 
     if (strncmp(pattern, "**", 2) == 0) {
+        /* "**" spans zero or more directories: the rest of the pattern applies
+         * here, and the whole pattern again in every subdirectory below. */
+        const char* rest = pattern + 2;
+        if (*rest == '/' || *rest == '\\') rest++;
+        if (cbuild_expand_wildcard_recursive(dir_path, *rest ? rest : "*", files, file_count, capacity) != 0)
+            return -1;
         recursive_search = 1;
-
-        if (pattern[2] == '/' || pattern[2] == '\\') {
-            strcpy(next_pattern, pattern + 3);
-        } else {
-            strcpy(next_pattern, pattern + 2);
-        }
     }
 
 #ifdef _WIN32
@@ -246,11 +254,6 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (recursive_search) {
-                if (next_pattern[0]) {
-                    cbuild_expand_wildcard_recursive(full_path, next_pattern, files,
-                                                     file_count, capacity);
-                }
-
                 cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count,
                                                  capacity);
             } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {
@@ -301,11 +304,6 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
         struct stat st;
         if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
             if (recursive_search) {
-                if (next_pattern[0]) {
-                    cbuild_expand_wildcard_recursive(full_path, next_pattern, files,
-                                                     file_count, capacity);
-                }
-
                 cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count,
                                                  capacity);
             } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {

@@ -313,6 +313,149 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
     }
 }
 
+/* Append sorted copies of items so the command, and so its signature, is stable. */
+static void cbuild__argv_append_sorted(cbuild_argv_t* argv, char** items, int count, const char* prefix) {
+    if (count <= 0) return;
+    char** tmp = (char**)malloc(sizeof(char*) * count);
+    if (!tmp) return;
+    memcpy(tmp, items, sizeof(char*) * count);
+    qsort(tmp, count, sizeof(char*), cbuild__strcmp_wrapper);
+    for (int i = 0; i < count; ++i) {
+        if (prefix) {
+            cbuild__argv_append_prefixed(argv, prefix, tmp[i]);
+        } else {
+            cbuild_argv_append(argv, tmp[i]);
+        }
+    }
+    free(tmp);
+}
+
+/* Build the archiver or linker argv for a target. The link step and its rebuild
+ * signature both go through here so they cannot drift. obj_files must be sorted. */
+static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_files, int obj_count,
+                              cbuild_argv_t* argv) {
+    if (t->type == TARGET_STATIC_LIB) {
+        /* Use append_flags to handle archivers with spaces (e.g., "zig ar") */
+        cbuild_argv_append_flags(argv, ctx->ar);
+        if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
+            cbuild__argv_append_prefixed(argv, "/OUT:", t->output_file);
+        } else {
+            cbuild_argv_append(argv, "rcs");
+            cbuild_argv_append(argv, t->output_file);
+        }
+        for (int i = 0; i < obj_count; ++i)
+            cbuild_argv_append(argv, obj_files[i]);
+        return;
+    }
+
+    int msvc = cbuild_target_cc_kind(ctx, t) == CBUILD_CC_MSVC;
+
+    /* Use append_flags to handle linkers with spaces (e.g., "zig cc -target ...") */
+    cbuild_argv_append_flags(argv, cbuild_target_linker(ctx, t));
+    if (msvc) {
+        cbuild_argv_append(argv, "/nologo");
+        cbuild__argv_append_prefixed(argv, "/Fe:", t->output_file);
+    } else {
+        cbuild_argv_append(argv, "-o");
+        cbuild_argv_append(argv, t->output_file);
+    }
+
+    for (int i = 0; i < obj_count; ++i)
+        cbuild_argv_append(argv, obj_files[i]);
+
+    cbuild__argv_append_sorted(argv, t->lib_dirs, t->lib_dir_count, msvc ? "/LIBPATH:" : "-L");
+
+    if (t->exposed_lib_count > 0) {
+        // Export dynamic symbols for plugin/dlopen use
+        if (!msvc) {
+#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
+            cbuild_argv_append(argv, "-Wl,-E");
+#endif
+        }
+    }
+    cbuild__argv_append_sorted(argv, t->exposed_libs, t->exposed_lib_count, NULL);
+
+    /* Our own libraries come before system libraries, so single-pass linkers
+     * can resolve their references (for example to libm) further along. */
+    for (int i = 0; i < t->dep_count; ++i) {
+        target_t* dep = t->dependencies[i];
+        if (dep->type == TARGET_STATIC_LIB) {
+            cbuild_argv_append(argv, dep->output_file);
+        } else if (dep->type == TARGET_SHARED_LIB) {
+#ifdef _WIN32
+            /* On Windows, link against .lib import library, not .dll */
+            char lib_path[1024];
+            strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
+            lib_path[sizeof(lib_path) - 1] = '\0';
+            size_t len = strlen(lib_path);
+            if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
+                strcpy(lib_path + len - 4, ".lib");
+            }
+            cbuild_argv_append(argv, lib_path);
+#else
+            cbuild_argv_append(argv, dep->output_file);
+#endif
+        }
+        // FILE_DEP is linkable iff its output looks like a library path.
+        else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
+                 cbuild__is_library_path(dep->output_file)) {
+            cbuild_argv_append(argv, dep->output_file);
+        }
+    }
+
+    for (int i = 0; i < t->link_lib_count; ++i) {
+        const char* lib = t->link_libs[i];
+        if (msvc) {
+            /* Skip 'm' (math) library on MSVC - it's part of the CRT */
+            if (strcmp(lib, "m") == 0) continue;
+            if (strchr(lib, '\\') || strchr(lib, ':')) {
+                cbuild_argv_append(argv, lib);
+            } else {
+                char lib_arg[512];
+                snprintf(lib_arg, sizeof(lib_arg), "%s.lib", lib);
+                cbuild_argv_append(argv, lib_arg);
+            }
+        } else if (strchr(lib, '/')) {
+            cbuild_argv_append(argv, lib);
+        } else {
+            cbuild__argv_append_prefixed(argv, "-l", lib);
+        }
+    }
+
+    for (int i = 0; i < t->ldflag_count; ++i)
+        cbuild_argv_append(argv, t->ldflags[i]);
+    for (int i = 0; i < ctx->global_ldflag_count; ++i)
+        cbuild_argv_append(argv, ctx->global_ldflags[i]);
+
+    if (t->type == TARGET_SHARED_LIB) {
+        if (msvc) {
+            cbuild_argv_append(argv, "/LD");
+        } else {
+#ifdef __APPLE__
+            cbuild_argv_append(argv, "-dynamiclib");
+            if (t->soname) {
+                cbuild_argv_append(argv, "-install_name");
+                cbuild__argv_append_prefixed(argv, "@rpath/", t->soname);
+            }
+#else
+            cbuild_argv_append(argv, "-shared");
+            if (t->soname) cbuild__argv_append_prefixed(argv, "-Wl,-soname,", t->soname);
+#endif
+        }
+    }
+}
+
+/* Everything that must stay the same for a linked output to be reusable. */
+static char* cbuild__link_signature(cbuild_argv_t* argv) {
+    char* sig = NULL;
+    for (int i = 0; i < argv->count; ++i) {
+        append_format(&sig, "%s\n", argv->args[i]);
+    }
+    const char* ev = getenv("LDFLAGS");
+    if (ev) append_format(&sig, "ENV:LDFLAGS=%s\n", ev);
+    return sig;
+}
+
 static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
     if (t->external) {
         if (!cbuild_file_exists(t->output_file)) {
@@ -324,9 +467,6 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
 
     /* Compute and apply effective build configuration (defaults → active → target) */
     cbuild__apply_config_if_needed(ctx, t);
-
-    /* Use target's cc_kind_override if set, otherwise fall back to context */
-    cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
 
     if (t->type == TARGET_DUMMY) {
         cbuild__log_step(ctx, "DUMMY", CBUILD_COLOR_MAGENTA, "%s", t->name);
@@ -396,6 +536,8 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
         obj_files[i] = strdup(objname);
     }
+    /* Sort object files to stabilize build results */
+    qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
 
     int needs_link = compiled_sources > 0;
     cbuild_mtime_t out_mtime;
@@ -430,349 +572,41 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         }
     }
 
+    cbuild_argv_t argv;
+    cbuild_argv_init(&argv);
+    cbuild__link_argv(ctx, t, obj_files, obj_count, &argv);
+    char* link_sig = cbuild__link_signature(&argv);
+    char link_sig_path[1024];
+    snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
+
     /* If timestamps say "up-to-date", also verify the link command signature */
     if (!needs_link) {
-        char* link_sig = NULL;
-        cbuild_argv_t largv;
-        cbuild_argv_init(&largv);
-
-        const char* ld = cbuild_target_linker(ctx, t);
-        if (t->type == TARGET_STATIC_LIB) {
-            cbuild_argv_append(&largv, ctx->ar);
-            if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
-                char out_arg[1024];
-                snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
-                cbuild_argv_append(&largv, out_arg);
-            } else {
-                cbuild_argv_append(&largv, "rcs");
-                cbuild_argv_append(&largv, t->output_file);
-            }
-            char** tmp_objs = (char**)malloc(sizeof(char*) * obj_count);
-            for (int i = 0; i < obj_count; ++i) tmp_objs[i] = obj_files[i];
-            qsort(tmp_objs, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i) cbuild_argv_append(&largv, tmp_objs[i]);
-            free(tmp_objs);
-        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-            cbuild_argv_append(&largv, ld);
-            if (cc_kind == CBUILD_CC_MSVC) {
-                cbuild_argv_append(&largv, "/nologo");
-                char fe_arg[1024];
-                snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
-                cbuild_argv_append(&largv, fe_arg);
-            } else {
-                cbuild_argv_append(&largv, "-o");
-                cbuild_argv_append(&largv, t->output_file);
-            }
-
-            char** tmp_objs = (char**)malloc(sizeof(char*) * obj_count);
-            for (int i = 0; i < obj_count; ++i) tmp_objs[i] = obj_files[i];
-            qsort(tmp_objs, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i) cbuild_argv_append(&largv, tmp_objs[i]);
-            free(tmp_objs);
-
-            if (t->lib_dir_count > 0) {
-                char** tmp = (char**)malloc(sizeof(char*) * t->lib_dir_count);
-                for (int i = 0; i < t->lib_dir_count; ++i) tmp[i] = t->lib_dirs[i];
-                qsort(tmp, t->lib_dir_count, sizeof(char*), cbuild__strcmp_wrapper);
-                for (int i = 0; i < t->lib_dir_count; ++i) {
-                    char lib_arg[1024];
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", tmp[i]);
-                    } else {
-                        snprintf(lib_arg, sizeof(lib_arg), "-L%s", tmp[i]);
-                    }
-                    cbuild_argv_append(&largv, lib_arg);
-                }
-                free(tmp);
-            }
-
-            if (t->exposed_lib_count > 0) {
-                if (cc_kind != CBUILD_CC_MSVC) {
-#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
-                    cbuild_argv_append(&largv, "-Wl,-E");
-#endif
-                }
-            }
-
-            if (t->exposed_lib_count > 0) {
-                char** tmp = (char**)malloc(sizeof(char*) * t->exposed_lib_count);
-                for (int i = 0; i < t->exposed_lib_count; ++i) tmp[i] = t->exposed_libs[i];
-                qsort(tmp, t->exposed_lib_count, sizeof(char*), cbuild__strcmp_wrapper);
-                for (int i = 0; i < t->exposed_lib_count; ++i) {
-                    cbuild_argv_append(&largv, tmp[i]);
-                }
-                free(tmp);
-            }
-
-            if (t->link_lib_count > 0) {
-                for (int i = 0; i < t->link_lib_count; ++i) {
-                    const char* lib = t->link_libs[i];
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        if (strchr(lib, '\\') || strchr(lib, ':')) {
-                            cbuild_argv_append(&largv, lib);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "%s.lib", lib);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    } else {
-                        if (strchr(lib, '/')) {
-                            cbuild_argv_append(&largv, lib);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "-l%s", lib);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    }
-                }
-            }
-
-            if (t->dep_count > 0) {
-                for (int i = 0; i < t->dep_count; ++i) {
-                    target_t* dep = t->dependencies[i];
-                    if (dep->type == TARGET_STATIC_LIB) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    } else if (dep->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                        /* On Windows, link against .lib import library, not .dll */
-                        char lib_path[1024];
-                        strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
-                        lib_path[sizeof(lib_path) - 1] = '\0';
-                        size_t len = strlen(lib_path);
-                        if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
-                            strcpy(lib_path + len - 4, ".lib");
-                        }
-                        cbuild_argv_append(&largv, lib_path);
-#else
-                        cbuild_argv_append(&largv, dep->output_file);
-#endif
-                    } else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
-                               cbuild__is_library_path(dep->output_file)) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    }
-                }
-            }
-
-            for (int i = 0; i < t->ldflag_count; ++i)
-                cbuild_argv_append(&largv, t->ldflags[i]);
-            for (int i = 0; i < ctx->global_ldflag_count; ++i)
-                cbuild_argv_append(&largv, ctx->global_ldflags[i]);
-
-            if (t->type == TARGET_SHARED_LIB) {
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    cbuild_argv_append(&largv, "/LD");
-                } else {
-#ifdef __APPLE__
-                    cbuild_argv_append(&largv, "-dynamiclib");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-install_name");
-                        cbuild_argv_append(&largv, soname_arg);
-                        snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
-                        cbuild_argv_append(&largv, soname_arg);
-                    }
-#else
-                    cbuild_argv_append(&largv, "-shared");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
-                        cbuild_argv_append(&largv, soname_arg);
-                    }
-#endif
-                }
-            }
-        }
-
-        for (int i = 0; i < largv.count; ++i) {
-            append_format(&link_sig, "%s\n", largv.args[i]);
-        }
-        const char* ev = getenv("LDFLAGS");
-        if (ev) append_format(&link_sig, "ENV:LDFLAGS=%s\n", ev);
-
-        cbuild_argv_free(&largv);
-
-        char link_sig_path[1024];
-        snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
-
-        int link_sig_mismatch = 0;
         FILE* lf = fopen(link_sig_path, "rb");
         if (!lf) {
-            link_sig_mismatch = 1;
+            needs_link = 1;
         } else {
             fseek(lf, 0, SEEK_END);
             long lsz = ftell(lf);
             fseek(lf, 0, SEEK_SET);
-            char* prev = (char*)malloc((size_t)lsz + 1);
+            char* prev = (lsz >= 0) ? (char*)malloc((size_t)lsz + 1) : NULL;
             if (!prev) {
-                link_sig_mismatch = 1;
+                needs_link = 1;
             } else {
                 size_t rd = fread(prev, 1, (size_t)lsz, lf);
                 prev[rd] = '\0';
-                if (strcmp(prev, link_sig ? link_sig : "") != 0) {
-                    link_sig_mismatch = 1;
-                }
+                if (strcmp(prev, link_sig ? link_sig : "") != 0) needs_link = 1;
                 free(prev);
             }
             fclose(lf);
         }
-        if (link_sig) free(link_sig);
-        if (link_sig_mismatch) {
-            needs_link = 1;
-        }
     }
+
     if (needs_link) {
         char output_dir[1024];
         get_dir_from_path(t->output_file, output_dir, sizeof(output_dir));
         ensure_dir_exists(output_dir);
 
         cbuild__log_step(ctx, "LINK", CBUILD_COLOR_YELLOW, "%s", t->output_file);
-
-        /* Build argv for linking */
-        cbuild_argv_t argv;
-        cbuild_argv_init(&argv);
-
-        const char* ld = cbuild_target_linker(ctx, t);
-        if (t->type == TARGET_STATIC_LIB) {
-            /* Use append_flags to handle archivers with spaces (e.g., "zig ar") */
-            cbuild_argv_append_flags(&argv, ctx->ar);
-            if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
-                char out_arg[1024];
-                snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
-                cbuild_argv_append(&argv, out_arg);
-            } else {
-                cbuild_argv_append(&argv, "rcs");
-                cbuild_argv_append(&argv, t->output_file);
-            }
-            /* Sort object files to stabilize build results */
-            qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i)
-                cbuild_argv_append(&argv, obj_files[i]);
-
-        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-            /* Use append_flags to handle linkers with spaces (e.g., "zig cc -target ...") */
-            cbuild_argv_append_flags(&argv, ld);
-
-            if (cc_kind == CBUILD_CC_MSVC) {
-                cbuild_argv_append(&argv, "/nologo");
-                char fe_arg[1024];
-                snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
-                cbuild_argv_append(&argv, fe_arg);
-            } else {
-                cbuild_argv_append(&argv, "-o");
-                cbuild_argv_append(&argv, t->output_file);
-            }
-
-            /* Sort object files to stabilize build results */
-            qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i)
-                cbuild_argv_append(&argv, obj_files[i]);
-
-            /* Sort library directories to stabilize build results */
-            if (t->lib_dir_count > 0)
-                qsort(t->lib_dirs, t->lib_dir_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < t->lib_dir_count; ++i) {
-                char lib_arg[1024];
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", t->lib_dirs[i]);
-                } else {
-                    snprintf(lib_arg, sizeof(lib_arg), "-L%s", t->lib_dirs[i]);
-                }
-                cbuild_argv_append(&argv, lib_arg);
-            }
-
-            if (t->exposed_lib_count > 0) {
-                // Export dynamic symbols for plugin/dlopen use
-                if (cc_kind != CBUILD_CC_MSVC) {
-#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
-                    cbuild_argv_append(&argv, "-Wl,-E");
-#endif
-                }
-            }
-
-            /* Sort exposed libraries to stabilize build results */
-            if (t->exposed_lib_count > 0)
-                qsort(t->exposed_libs, t->exposed_lib_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < t->exposed_lib_count; ++i) {
-                cbuild_argv_append(&argv, t->exposed_libs[i]);
-            }
-
-            for (int i = 0; i < t->link_lib_count; ++i) {
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    /* Skip 'm' (math) library on MSVC - it's part of the CRT */
-                    if (strcmp(t->link_libs[i], "m") == 0) continue;
-                    if (strchr(t->link_libs[i], '\\') || strchr(t->link_libs[i], ':')) {
-                        cbuild_argv_append(&argv, t->link_libs[i]);
-                    } else {
-                        char lib_arg[512];
-                        snprintf(lib_arg, sizeof(lib_arg), "%s.lib", t->link_libs[i]);
-                        cbuild_argv_append(&argv, lib_arg);
-                    }
-                } else {
-                    if (strchr(t->link_libs[i], '/')) {
-                        cbuild_argv_append(&argv, t->link_libs[i]);
-                    } else {
-                        char lib_arg[512];
-                        snprintf(lib_arg, sizeof(lib_arg), "-l%s", t->link_libs[i]);
-                        cbuild_argv_append(&argv, lib_arg);
-                    }
-                }
-            }
-
-            for (int i = 0; i < t->dep_count; ++i) {
-                target_t* dep = t->dependencies[i];
-                if (dep->type == TARGET_STATIC_LIB) {
-                    cbuild_argv_append(&argv, dep->output_file);
-                } else if (dep->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                    /* On Windows, link against .lib import library, not .dll */
-                    char lib_path[1024];
-                    strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
-                    lib_path[sizeof(lib_path) - 1] = '\0';
-                    size_t len = strlen(lib_path);
-                    if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
-                        strcpy(lib_path + len - 4, ".lib");
-                    }
-                    cbuild_argv_append(&argv, lib_path);
-#else
-                    cbuild_argv_append(&argv, dep->output_file);
-#endif
-                }
-                // FILE_DEP is linkable iff its output looks like a library path.
-                else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
-                         cbuild__is_library_path(dep->output_file)) {
-                    cbuild_argv_append(&argv, dep->output_file);
-                }
-            }
-
-            for (int i = 0; i < t->ldflag_count; ++i)
-                cbuild_argv_append(&argv, t->ldflags[i]);
-            for (int i = 0; i < ctx->global_ldflag_count; ++i)
-                cbuild_argv_append(&argv, ctx->global_ldflags[i]);
-
-            if (t->type == TARGET_SHARED_LIB) {
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    cbuild_argv_append(&argv, "/LD");
-                } else {
-#ifdef __APPLE__
-                    cbuild_argv_append(&argv, "-dynamiclib");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-install_name");
-                        cbuild_argv_append(&argv, soname_arg);
-                        snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
-                        cbuild_argv_append(&argv, soname_arg);
-                    }
-#else
-                    cbuild_argv_append(&argv, "-shared");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
-                        cbuild_argv_append(&argv, soname_arg);
-                    }
-#endif
-                }
-            }
-        }
 
         // Print command in verbose mode before executing
         if (ctx->verbose) {
@@ -790,10 +624,8 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
             cbuild__log(ctx, CBUILD_LOG_VERBOSE, "%s", cmd_buf);
         }
 
-        int rc;
         char* output = NULL;
-        rc = cbuild_spawn_process(ctx, &argv, 1, &output);
-        cbuild_argv_free(&argv);
+        int rc = cbuild_spawn_process(ctx, &argv, 1, &output);
 
         if (output && rc != 0) {
             fwrite(output, 1, strlen(output), stderr);
@@ -804,162 +636,19 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         if (rc != 0) {
             cbuild__log_status(ctx, 0, "Linking failed for %s", t->output_file);
             *error_flag = 1;
-            goto cleanup;
         } else {
             t->rebuilt = 1;
             /* On successful link, write signature of the link command */
-            char* link_sig = NULL;
-            cbuild_argv_t largv;
-            cbuild_argv_init(&largv);
-
-            const char* ld2 = cbuild_target_linker(ctx, t);
-            if (t->type == TARGET_STATIC_LIB) {
-                cbuild_argv_append(&largv, ctx->ar);
-                if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
-                    char out_arg[1024];
-                    snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
-                    cbuild_argv_append(&largv, out_arg);
-                } else {
-                    cbuild_argv_append(&largv, "rcs");
-                    cbuild_argv_append(&largv, t->output_file);
-                }
-                /* object files were already sorted before linking */
-                for (int i = 0; i < obj_count; ++i)
-                    cbuild_argv_append(&largv, obj_files[i]);
-
-            } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-                cbuild_argv_append(&largv, ld2);
-
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    cbuild_argv_append(&largv, "/nologo");
-                    char fe_arg[1024];
-                    snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
-                    cbuild_argv_append(&largv, fe_arg);
-                } else {
-                    cbuild_argv_append(&largv, "-o");
-                    cbuild_argv_append(&largv, t->output_file);
-                }
-
-                for (int i = 0; i < obj_count; ++i)
-                    cbuild_argv_append(&largv, obj_files[i]);
-
-                for (int i = 0; i < t->lib_dir_count; ++i) {
-                    char lib_arg[1024];
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", t->lib_dirs[i]);
-                    } else {
-                        snprintf(lib_arg, sizeof(lib_arg), "-L%s", t->lib_dirs[i]);
-                    }
-                    cbuild_argv_append(&largv, lib_arg);
-                }
-
-                if (t->exposed_lib_count > 0) {
-                    if (cc_kind != CBUILD_CC_MSVC) {
-#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
-                        cbuild_argv_append(&largv, "-Wl,-E");
-#endif
-                    }
-                }
-
-                for (int i = 0; i < t->exposed_lib_count; ++i) {
-                    cbuild_argv_append(&largv, t->exposed_libs[i]);
-                }
-
-                for (int i = 0; i < t->link_lib_count; ++i) {
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        /* Skip 'm' (math) library on MSVC - it's part of the CRT */
-                        if (strcmp(t->link_libs[i], "m") == 0) continue;
-                        if (strchr(t->link_libs[i], '\\') || strchr(t->link_libs[i], ':')) {
-                            cbuild_argv_append(&largv, t->link_libs[i]);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "%s.lib", t->link_libs[i]);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    } else {
-                        if (strchr(t->link_libs[i], '/')) {
-                            cbuild_argv_append(&largv, t->link_libs[i]);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "-l%s", t->link_libs[i]);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    }
-                }
-
-                for (int i = 0; i < t->dep_count; ++i) {
-                    target_t* dep = t->dependencies[i];
-                    if (dep->type == TARGET_STATIC_LIB) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    } else if (dep->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                        /* On Windows, link against .lib import library, not .dll */
-                        char lib_path[1024];
-                        strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
-                        lib_path[sizeof(lib_path) - 1] = '\0';
-                        size_t len = strlen(lib_path);
-                        if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
-                            strcpy(lib_path + len - 4, ".lib");
-                        }
-                        cbuild_argv_append(&largv, lib_path);
-#else
-                        cbuild_argv_append(&largv, dep->output_file);
-#endif
-                    } else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
-                               cbuild__is_library_path(dep->output_file)) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    }
-                }
-
-                for (int i = 0; i < t->ldflag_count; ++i)
-                    cbuild_argv_append(&largv, t->ldflags[i]);
-                for (int i = 0; i < ctx->global_ldflag_count; ++i)
-                    cbuild_argv_append(&largv, ctx->global_ldflags[i]);
-
-                if (t->type == TARGET_SHARED_LIB) {
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        cbuild_argv_append(&largv, "/LD");
-                    } else {
-#ifdef __APPLE__
-                        cbuild_argv_append(&largv, "-dynamiclib");
-                        if (t->soname) {
-                            char soname_arg[1024];
-                            snprintf(soname_arg, sizeof(soname_arg), "-install_name");
-                            cbuild_argv_append(&largv, soname_arg);
-                            snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
-                            cbuild_argv_append(&largv, soname_arg);
-                        }
-#else
-                        cbuild_argv_append(&largv, "-shared");
-                        if (t->soname) {
-                            char soname_arg[1024];
-                            snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
-                            cbuild_argv_append(&largv, soname_arg);
-                        }
-#endif
-                    }
-                }
-            }
-
-            for (int i = 0; i < largv.count; ++i) {
-                append_format(&link_sig, "%s\n", largv.args[i]);
-            }
-            const char* lev = getenv("LDFLAGS");
-            if (lev) append_format(&link_sig, "ENV:LDFLAGS=%s\n", lev);
-
-            char link_sig_path[1024];
-            snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
             FILE* lf = fopen(link_sig_path, "wb");
             if (lf) {
                 fwrite(link_sig ? link_sig : "", 1, link_sig ? strlen(link_sig) : 0, lf);
                 fclose(lf);
             }
-            if (link_sig) free(link_sig);
-            cbuild_argv_free(&largv);
         }
     }
 
-cleanup:
+    free(link_sig);
+    cbuild_argv_free(&argv);
     for (int i = 0; i < obj_count; ++i)
         free(obj_files[i]);
     free(obj_files);

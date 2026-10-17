@@ -52,6 +52,7 @@ extern int sysctlbyname(const char* name, void* oldp, size_t* oldlenp,
                         void* newp, size_t newlen);
 #endif
 #include <pthread.h>
+#include <signal.h>
 #include <strings.h>
 #include <unistd.h>
 
@@ -276,6 +277,20 @@ struct cbuild_context {
     /* Run subcommand name */
     const char* run_subcmd;
 
+    /* Tests and the --test selection */
+    test_t** tests;
+    int test_count;
+    int test_cap;
+    int run_tests;
+    int list_tests;
+    int test_timeout;  /* default seconds for tests without their own limit */
+    char** test_labels;
+    int test_label_count, test_label_cap;
+    char** test_filters;
+    int test_filter_count, test_filter_cap;
+    char** test_excludes;
+    int test_exclude_count, test_exclude_cap;
+
     /* User data for embedders */
     void* user_data;
 };
@@ -382,6 +397,20 @@ struct cbuild_target {
     int cc_kind_override;  // -1 = use global g_cc_kind, else cbuild_cc_kind_t
 };
 
+struct cbuild_test {
+    char* name;
+    target_t* target;  /* built first; when an executable, it is the program */
+    char** args;
+    int argc;
+    target_t** deps;
+    int dep_count, dep_cap;
+    char** labels;
+    int label_count, label_cap;
+    char* lock;
+    int skip_code;  /* -1 when no exit code means "skipped" */
+    int timeout;    /* seconds, 0 = no limit */
+};
+
 #define CBUILD_MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /* --- Process Spawning API (for subproject builds) --- */
@@ -407,6 +436,7 @@ CBUILD_INTERNAL void cbuild_init(cbuild_context_t* ctx);
 
 /* flags.c */
 CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx);
+CBUILD_INTERNAL int cbuild__positional_args(cbuild_context_t* ctx, int argc, char** argv, int* first);
 CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_flag_phase_t phase,
                                                  int* argc, char*** argvp);
 
@@ -442,6 +472,11 @@ CBUILD_INTERNAL void cbuild_argv_append_flags(cbuild_argv_t* argv, const char* f
 CBUILD_INTERNAL int cbuild__add_define_to_list(cbuild_context_t* ctx, char*** arr, int* count, int* cap,
                                                 const char* macro,
                                                 const char* value_optional);
+
+/* test.c */
+CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__free_tests(cbuild_context_t* ctx);
 
 /* toolchain.c */
 CBUILD_INTERNAL cbuild_cc_kind_t detect_cc_kind(const char* exe);

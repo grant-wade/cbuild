@@ -84,10 +84,36 @@ int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_nam
     return 0;
 }
 
+const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, char short_name) {
+    const char* value = NULL;
+    size_t long_len = long_name ? strlen(long_name) : 0;
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (!arg || arg[0] != '-') continue;
+        if (strcmp(arg, "--") == 0) break;
+
+        if (arg[1] == '-') {
+            if (!long_name || strncmp(arg + 2, long_name, long_len) != 0) continue;
+            const char* rest = arg + 2 + long_len;
+            if (*rest == '=') {
+                value = rest + 1;
+            } else if (*rest == '\0' && i + 1 < argc) {
+                value = argv[++i];
+            }
+        } else if (short_name && arg[1] == short_name) {
+            if (arg[2]) {
+                value = arg + 2;
+            } else if (i + 1 < argc) {
+                value = argv[++i];
+            }
+        }
+    }
+    return value;
+}
+
 CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
-    char buf[4096];
-    int pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "Usage: %s [flags]\n\nFlags:", ctx->argv0_for_help);
+    /* One log call per line: the logger formats into a fixed-size buffer. */
+    cbuild__log(ctx, CBUILD_LOG_INFO, "Usage: %s [flags] [subcommand]\n\nFlags:", ctx->argv0_for_help);
     const char* phase_names[] = { "Pre-parse", "Before build", "After build" };
     for (int ph = CBUILD_FLAG_PRE; ph <= CBUILD_FLAG_AFTER_BUILD; ++ph) {
         int header = 0;
@@ -95,31 +121,79 @@ CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
             cbuild_flag_handler_t* fh = &ctx->flag_handlers[i];
             if (fh->phase != (cbuild_flag_phase_t)ph) continue;
             if (!header) {
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "\n\n  %s:\n", phase_names[ph]);
+                cbuild__log(ctx, CBUILD_LOG_INFO, "\n  %s:", phase_names[ph]);
                 header = 1;
             }
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "    ");
-            if (fh->short_name) pos += snprintf(buf + pos, sizeof(buf) - pos, "-%c", fh->short_name);
-            if (fh->short_name && fh->long_name) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
-            if (fh->long_name) pos += snprintf(buf + pos, sizeof(buf) - pos, "--%s", fh->long_name);
-            if (fh->takes_value) pos += snprintf(buf + pos, sizeof(buf) - pos, " <val>");
-            if (fh->help) pos += snprintf(buf + pos, sizeof(buf) - pos, "\n        %s", fh->help);
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
+            char short_part[8] = "";
+            if (fh->short_name) snprintf(short_part, sizeof(short_part), "-%c%s", fh->short_name,
+                                         fh->long_name ? ", " : "");
+            cbuild__log(ctx, CBUILD_LOG_INFO, "    %s%s%s%s", short_part, fh->long_name ? "--" : "",
+                        fh->long_name ? fh->long_name : "", fh->takes_value ? " <val>" : "");
+            if (fh->help) cbuild__log(ctx, CBUILD_LOG_INFO, "        %s", fh->help);
         }
     }
     if (ctx->subcommand_count > 0) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "\nSubcommands:\n");
+        cbuild__log(ctx, CBUILD_LOG_INFO, "\nSubcommands:");
         for (int i = 0; i < ctx->subcommand_count; ++i) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "    %s\n", ctx->subcommands[i]->name);
+            cbuild__log(ctx, CBUILD_LOG_INFO, "    %s", ctx->subcommands[i]->name);
         }
     }
-    cbuild__log(ctx, CBUILD_LOG_INFO, "%s", buf);
+}
+
+/* The handler registered for a flag token in any phase, or NULL. For a short
+   cluster, the first letter decides. */
+static cbuild_flag_handler_t* cbuild__find_any_phase(cbuild_context_t* ctx, const char* arg) {
+    if (arg[1] == '-') {
+        const char* name = arg + 2;
+        size_t n = strcspn(name, "=");
+        for (int i = 0; i < ctx->flag_count; ++i) {
+            cbuild_flag_handler_t* fh = &ctx->flag_handlers[i];
+            if (fh->long_name && strlen(fh->long_name) == n && strncmp(fh->long_name, name, n) == 0) return fh;
+        }
+        return NULL;
+    }
+    for (int i = 0; i < ctx->flag_count; ++i) {
+        if (ctx->flag_handlers[i].short_name == arg[1]) return &ctx->flag_handlers[i];
+    }
+    return NULL;
+}
+
+/* Whether a flag token takes the following argument as its value. */
+static int cbuild__flag_uses_next(cbuild_flag_handler_t* fh, const char* arg) {
+    if (!fh->takes_value) return 0;
+    if (arg[1] == '-') return strchr(arg, '=') == NULL;
+    return arg[2] == '\0';
+}
+
+/* Counts the arguments that are not flags (or flag values) left for a later
+   phase, storing the index of the first in *first (-1 if none). */
+CBUILD_INTERNAL int cbuild__positional_args(cbuild_context_t* ctx, int argc, char** argv, int* first) {
+    int count = 0;
+    int stop = 0;
+    *first = -1;
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (!arg) continue;
+        if (!stop && strcmp(arg, "--") == 0) {
+            stop = 1;
+            continue;
+        }
+        if (!stop && arg[0] == '-' && arg[1] != '\0') {
+            cbuild_flag_handler_t* fh = cbuild__find_any_phase(ctx, arg);
+            if (fh && cbuild__flag_uses_next(fh, arg)) i++;
+            continue;
+        }
+        if (*first < 0) *first = i;
+        count++;
+    }
+    return count;
 }
 
 /* strict dispatcher:
    - consumes handled flags from argv (compacting)
+   - leaves flags registered for another phase, and their values, in place
    - errors on any unknown token that *looks* like a flag (- or --)
-   - honors "--" to stop flag parsing
+   - honors "--" to stop flag parsing (and keeps it for later phases)
 */
 CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_flag_phase_t phase,
                                                  int* argc, char*** argvp) {
@@ -137,7 +211,16 @@ CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_f
         }
 
         if (strcmp(arg, "--") == 0) {
+            av[write++] = av[read];
             stop = 1;
+            continue;
+        }
+
+        /* Another phase's flag waits for that phase's dispatch. */
+        cbuild_flag_handler_t* other = cbuild__find_any_phase(ctx, arg);
+        if (other && other->phase != phase) {
+            av[write++] = av[read];
+            if (cbuild__flag_uses_next(other, arg) && read + 1 < ac) av[write++] = av[++read];
             continue;
         }
 

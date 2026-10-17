@@ -373,6 +373,8 @@ void cbuild_teardown(cbuild_context_t* ctx) {
     ctx->subcommand_count = 0;
     ctx->subcommand_cap = 0;
 
+    cbuild__free_tests(ctx);
+
     // Free subprojects
     if (ctx->subprojects) {
         for (int i = 0; i < ctx->subproject_count; ++i) {

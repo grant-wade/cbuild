@@ -59,6 +59,29 @@ int main(void) {
     for (int i = 0; i < file_count; ++i) free(files[i]);
     free(files);
 
+    /* "**" spans zero or more directories, and results come back sorted. */
+    assert(cbuild_expand_wildcard("example/**/*.c", &files, &file_count) == 0);
+    assert(file_count == 5);
+    assert(strcmp(files[0], "example/build.c") == 0);
+    assert(strcmp(files[1], "example/lib/build.c") == 0);
+    assert(strcmp(files[2], "example/lib/src/lib.c") == 0);
+    assert(strcmp(files[3], "example/lib/src/math.c") == 0);
+    assert(strcmp(files[4], "example/main.c") == 0);
+    for (int i = 0; i < file_count; ++i) free(files[i]);
+    free(files);
+    assert(cbuild_expand_wildcard("example/*/src/*.h", &files, &file_count) == 0);
+    assert(file_count == 2);
+    assert(strcmp(files[0], "example/lib/src/lib.h") == 0);
+    for (int i = 0; i < file_count; ++i) free(files[i]);
+    free(files);
+
+    const char *flag_argv[] = { "cbuild", "--mode=fast", "-j", "4", "--out", "dir", "--", "--mode=late" };
+    assert(strcmp(cbuild_get_flag_value(8, (char **)flag_argv, "mode", 0), "fast") == 0);
+    assert(strcmp(cbuild_get_flag_value(8, (char **)flag_argv, "jobs", 'j'), "4") == 0);
+    assert(strcmp(cbuild_get_flag_value(8, (char **)flag_argv, "out", 0), "dir") == 0);
+    assert(cbuild_get_flag_value(8, (char **)flag_argv, "missing", 0) == NULL);
+    assert(cbuild_add_test(ctx, "no program", NULL, NULL, 0) == NULL);
+
     FILE *temporary = fopen("tests/api-temp.txt", "w");
     assert(temporary != NULL);
     fputs("temporary\n", temporary);

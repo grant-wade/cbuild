@@ -177,6 +177,32 @@ try {
         throw "Build program did not rebuild itself"
     }
 
+    # Tests: selection, pass, skip, failure exit status, and timeouts.
+    $listTests = Invoke-Capture .\cbuild.exe @("--list-tests") "list-tests.log"
+    if ($listTests -notmatch "app_self_test" -or $listTests -notmatch "unit") { throw "--list-tests is incomplete" }
+    if ($listTests -match "app_fails") { throw "Failing test registered without --failing-tests" }
+    $testRun = Invoke-Capture .\cbuild.exe @("--test", "-j2") "test-run.log"
+    if ($testRun -notmatch "PASS.*app_self_test" -or $testRun -notmatch "PASS.*app_by_path" -or
+        $testRun -notmatch "SKIP.*app_skip" -or $testRun -notmatch "2 passed, 0 failed, 1 skipped") {
+        throw "Unexpected test results:`n$testRun"
+    }
+    $testLabel = Invoke-Capture .\cbuild.exe @("--test", "--test-label=unit", "--test-exclude=*skip") "test-label.log"
+    if ($testLabel -notmatch "1 passed, 0 failed, 0 skipped") { throw "Label selection failed:`n$testLabel" }
+    $testFail = & .\cbuild.exe --failing-tests --fail-code=7 --test --test-label=failing 2>&1
+    if ($LASTEXITCODE -eq 0) { throw "Failing tests unexpectedly passed" }
+    $testFail = $testFail -join "`n"
+    if ($testFail -notmatch "FAIL.*app_fails.*exit code 7" -or
+        $testFail -notmatch "FAIL.*app_timeout.*timed out after 1s" -or
+        $testFail -notmatch "0 passed, 2 failed, 0 skipped") {
+        throw "Unexpected failing-test results:`n$testFail"
+    }
+    if (-not (Test-Path build\tests\app_fails.log)) { throw "Failing test left no log" }
+    $testFilter = Invoke-Capture .\cbuild.exe @("--failing-tests", "--test", "--test-filter=app_*",
+        "--test-exclude=app_fails", "--test-exclude=app_timeout") "test-filter.log"
+    if ($testFilter -notmatch "2 passed, 0 failed, 1 skipped") { throw "Name selection failed:`n$testFilter" }
+    $spawn = Invoke-Capture .\cbuild.exe @("--spawn-check") "spawn-check.log"
+    if ($spawn -notmatch "spawn rc=4 output=sum=5") { throw "cbuild_spawn did not capture output:`n$spawn" }
+
     $null = Invoke-Capture .\cbuild.exe @("--clean") "clean.log"
     if (Test-Path build\test_app.exe) { throw "Clean left test_app.exe behind" }
 

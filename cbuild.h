@@ -22,6 +22,7 @@ and portability without external tools or scripts.
 - Sources/includes/lib-dirs and libraries; supports wildcards including ** recursive
 - Command API: pre/post target commands, argv-based execution, shell command lines, and C callbacks; command dependencies
 - Subcommands: register named actions and run them with --run
+- Tests: register test programs with labels, skip codes, timeouts, and locks; run them in parallel with --test
 - Subprojects: query targets via --manifest, build them on demand, and link as dependencies
 - compile_commands.json generation with full arguments array (for clangd, etc.)
 - Build configurations: Debug/Release presets, per-target configs, structured knobs (optimization, LTO, sanitizers, etc.)
@@ -64,6 +65,7 @@ Typical invocations:
     $ ./cbuild -j 8                   # builds with 8 parallel jobs
     $ ./cbuild --target=mytarget      # builds only the specified target
     $ ./cbuild --compile-commands     # writes compile_commands.json to the output dir
+    $ ./cbuild --test                 # builds what the tests need, then runs them
 
 4. Build Configurations
 -----------------------
@@ -197,6 +199,7 @@ typedef struct cbuild_target target_t;
 typedef struct cbuild_command command_t;
 typedef struct cbuild_subproject subproject_t;
 typedef struct cbuild_config config_t;
+typedef struct cbuild_test test_t;
 
 typedef void (*cbuild_subcommand_callback)(void* user_data);
 typedef int (*cbuild_flag_callback)(const char* value, void* user_data);
@@ -335,6 +338,27 @@ void cbuild_register_subcommand(cbuild_context_t* ctx, const char* name, target_
                                 cbuild_subcommand_callback callback,
                                 void* user_data);
 
+// *** Test API *** //
+/* Register a test. When target is an executable, the test runs its output with
+ * args as the arguments; otherwise args[0] names the program to run. Either
+ * way, target is built before the test runs. Exit code 0 passes. */
+test_t* cbuild_add_test(cbuild_context_t* ctx, const char* name, target_t* target,
+                        const char* const* args, int argc);
+/* Build another target before the test runs (a generated input, for example). */
+void cbuild_test_add_dependency(cbuild_context_t* ctx, test_t* test, target_t* target);
+/* Labels group tests for --test-label. */
+void cbuild_test_add_label(cbuild_context_t* ctx, test_t* test, const char* label);
+/* Treat this exit code as a skip rather than a failure. */
+void cbuild_test_set_skip_code(cbuild_context_t* ctx, test_t* test, int exit_code);
+/* Fail the test if it runs longer than this many seconds (0 = no limit). */
+void cbuild_test_set_timeout(cbuild_context_t* ctx, test_t* test, int seconds);
+/* Tests that share a lock name never run at the same time. */
+void cbuild_test_set_lock(cbuild_context_t* ctx, test_t* test, const char* lock);
+/* Build what the selected tests need, then run them in parallel. label and
+ * pattern (a wildcard on test names) may be NULL to select everything.
+ * Returns 0 when every selected test passed or was skipped, -1 otherwise. */
+int cbuild_run_tests(cbuild_context_t* ctx, const char* label, const char* pattern);
+
 /* Register a flag handler. */
 void cbuild_register_flag(cbuild_context_t* ctx, const char* long_name,
                           char short_name,
@@ -359,6 +383,16 @@ void cbuild_register_flag_str(cbuild_context_t* ctx, const char* long_name, char
 
 // *** Argument Parsing Helpers *** //
 int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_name);
+/* Value of the last --long_name=VALUE, --long_name VALUE, -xVALUE, or -x VALUE
+ * before any "--", or NULL. Lets a build read options before defining targets. */
+const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, char short_name);
+
+// *** Process Helpers *** //
+/* Run argv[0] with its arguments (no shell) and wait for it. When output is not
+ * NULL, stdout and stderr are captured into *output, a malloc'd string (or NULL
+ * if the program printed nothing) that the caller frees. Returns the exit
+ * status; a program that could not be started reports -1 (127 on Linux). */
+int cbuild_spawn(cbuild_context_t* ctx, const char* const* argv, int argc, char** output);
 
 // *** File System and Other Helpers *** //
 int cbuild_file_exists(const char* path);
@@ -504,6 +538,7 @@ extern int sysctlbyname(const char* name, void* oldp, size_t* oldlenp,
                         void* newp, size_t newlen);
 #endif
 #include <pthread.h>
+#include <signal.h>
 #include <strings.h>
 #include <unistd.h>
 
@@ -727,6 +762,20 @@ struct cbuild_context {
     /* Run subcommand name */
     const char* run_subcmd;
 
+    /* Tests and the --test selection */
+    test_t** tests;
+    int test_count;
+    int test_cap;
+    int run_tests;
+    int list_tests;
+    int test_timeout;  /* default seconds for tests without their own limit */
+    char** test_labels;
+    int test_label_count, test_label_cap;
+    char** test_filters;
+    int test_filter_count, test_filter_cap;
+    char** test_excludes;
+    int test_exclude_count, test_exclude_cap;
+
     /* User data for embedders */
     void* user_data;
 };
@@ -833,6 +882,20 @@ struct cbuild_target {
     int cc_kind_override;  // -1 = use global g_cc_kind, else cbuild_cc_kind_t
 };
 
+struct cbuild_test {
+    char* name;
+    target_t* target;  /* built first; when an executable, it is the program */
+    char** args;
+    int argc;
+    target_t** deps;
+    int dep_count, dep_cap;
+    char** labels;
+    int label_count, label_cap;
+    char* lock;
+    int skip_code;  /* -1 when no exit code means "skipped" */
+    int timeout;    /* seconds, 0 = no limit */
+};
+
 #define CBUILD_MAX(a, b) ((a) > (b) ? (a) : (b))
 
 /* --- Process Spawning API (for subproject builds) --- */
@@ -858,6 +921,7 @@ CBUILD_INTERNAL void cbuild_init(cbuild_context_t* ctx);
 
 /* flags.c */
 CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx);
+CBUILD_INTERNAL int cbuild__positional_args(cbuild_context_t* ctx, int argc, char** argv, int* first);
 CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_flag_phase_t phase,
                                                  int* argc, char*** argvp);
 
@@ -893,6 +957,11 @@ CBUILD_INTERNAL void cbuild_argv_append_flags(cbuild_argv_t* argv, const char* f
 CBUILD_INTERNAL int cbuild__add_define_to_list(cbuild_context_t* ctx, char*** arr, int* count, int* cap,
                                                 const char* macro,
                                                 const char* value_optional);
+
+/* test.c */
+CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__free_tests(cbuild_context_t* ctx);
 
 /* toolchain.c */
 CBUILD_INTERNAL cbuild_cc_kind_t detect_cc_kind(const char* exe);
@@ -1227,6 +1296,149 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
     }
 }
 
+/* Append sorted copies of items so the command, and so its signature, is stable. */
+static void cbuild__argv_append_sorted(cbuild_argv_t* argv, char** items, int count, const char* prefix) {
+    if (count <= 0) return;
+    char** tmp = (char**)malloc(sizeof(char*) * count);
+    if (!tmp) return;
+    memcpy(tmp, items, sizeof(char*) * count);
+    qsort(tmp, count, sizeof(char*), cbuild__strcmp_wrapper);
+    for (int i = 0; i < count; ++i) {
+        if (prefix) {
+            cbuild__argv_append_prefixed(argv, prefix, tmp[i]);
+        } else {
+            cbuild_argv_append(argv, tmp[i]);
+        }
+    }
+    free(tmp);
+}
+
+/* Build the archiver or linker argv for a target. The link step and its rebuild
+ * signature both go through here so they cannot drift. obj_files must be sorted. */
+static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_files, int obj_count,
+                              cbuild_argv_t* argv) {
+    if (t->type == TARGET_STATIC_LIB) {
+        /* Use append_flags to handle archivers with spaces (e.g., "zig ar") */
+        cbuild_argv_append_flags(argv, ctx->ar);
+        if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
+            cbuild__argv_append_prefixed(argv, "/OUT:", t->output_file);
+        } else {
+            cbuild_argv_append(argv, "rcs");
+            cbuild_argv_append(argv, t->output_file);
+        }
+        for (int i = 0; i < obj_count; ++i)
+            cbuild_argv_append(argv, obj_files[i]);
+        return;
+    }
+
+    int msvc = cbuild_target_cc_kind(ctx, t) == CBUILD_CC_MSVC;
+
+    /* Use append_flags to handle linkers with spaces (e.g., "zig cc -target ...") */
+    cbuild_argv_append_flags(argv, cbuild_target_linker(ctx, t));
+    if (msvc) {
+        cbuild_argv_append(argv, "/nologo");
+        cbuild__argv_append_prefixed(argv, "/Fe:", t->output_file);
+    } else {
+        cbuild_argv_append(argv, "-o");
+        cbuild_argv_append(argv, t->output_file);
+    }
+
+    for (int i = 0; i < obj_count; ++i)
+        cbuild_argv_append(argv, obj_files[i]);
+
+    cbuild__argv_append_sorted(argv, t->lib_dirs, t->lib_dir_count, msvc ? "/LIBPATH:" : "-L");
+
+    if (t->exposed_lib_count > 0) {
+        // Export dynamic symbols for plugin/dlopen use
+        if (!msvc) {
+#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
+            cbuild_argv_append(argv, "-Wl,-E");
+#endif
+        }
+    }
+    cbuild__argv_append_sorted(argv, t->exposed_libs, t->exposed_lib_count, NULL);
+
+    /* Our own libraries come before system libraries, so single-pass linkers
+     * can resolve their references (for example to libm) further along. */
+    for (int i = 0; i < t->dep_count; ++i) {
+        target_t* dep = t->dependencies[i];
+        if (dep->type == TARGET_STATIC_LIB) {
+            cbuild_argv_append(argv, dep->output_file);
+        } else if (dep->type == TARGET_SHARED_LIB) {
+#ifdef _WIN32
+            /* On Windows, link against .lib import library, not .dll */
+            char lib_path[1024];
+            strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
+            lib_path[sizeof(lib_path) - 1] = '\0';
+            size_t len = strlen(lib_path);
+            if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
+                strcpy(lib_path + len - 4, ".lib");
+            }
+            cbuild_argv_append(argv, lib_path);
+#else
+            cbuild_argv_append(argv, dep->output_file);
+#endif
+        }
+        // FILE_DEP is linkable iff its output looks like a library path.
+        else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
+                 cbuild__is_library_path(dep->output_file)) {
+            cbuild_argv_append(argv, dep->output_file);
+        }
+    }
+
+    for (int i = 0; i < t->link_lib_count; ++i) {
+        const char* lib = t->link_libs[i];
+        if (msvc) {
+            /* Skip 'm' (math) library on MSVC - it's part of the CRT */
+            if (strcmp(lib, "m") == 0) continue;
+            if (strchr(lib, '\\') || strchr(lib, ':')) {
+                cbuild_argv_append(argv, lib);
+            } else {
+                char lib_arg[512];
+                snprintf(lib_arg, sizeof(lib_arg), "%s.lib", lib);
+                cbuild_argv_append(argv, lib_arg);
+            }
+        } else if (strchr(lib, '/')) {
+            cbuild_argv_append(argv, lib);
+        } else {
+            cbuild__argv_append_prefixed(argv, "-l", lib);
+        }
+    }
+
+    for (int i = 0; i < t->ldflag_count; ++i)
+        cbuild_argv_append(argv, t->ldflags[i]);
+    for (int i = 0; i < ctx->global_ldflag_count; ++i)
+        cbuild_argv_append(argv, ctx->global_ldflags[i]);
+
+    if (t->type == TARGET_SHARED_LIB) {
+        if (msvc) {
+            cbuild_argv_append(argv, "/LD");
+        } else {
+#ifdef __APPLE__
+            cbuild_argv_append(argv, "-dynamiclib");
+            if (t->soname) {
+                cbuild_argv_append(argv, "-install_name");
+                cbuild__argv_append_prefixed(argv, "@rpath/", t->soname);
+            }
+#else
+            cbuild_argv_append(argv, "-shared");
+            if (t->soname) cbuild__argv_append_prefixed(argv, "-Wl,-soname,", t->soname);
+#endif
+        }
+    }
+}
+
+/* Everything that must stay the same for a linked output to be reusable. */
+static char* cbuild__link_signature(cbuild_argv_t* argv) {
+    char* sig = NULL;
+    for (int i = 0; i < argv->count; ++i) {
+        append_format(&sig, "%s\n", argv->args[i]);
+    }
+    const char* ev = getenv("LDFLAGS");
+    if (ev) append_format(&sig, "ENV:LDFLAGS=%s\n", ev);
+    return sig;
+}
+
 static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
     if (t->external) {
         if (!cbuild_file_exists(t->output_file)) {
@@ -1238,9 +1450,6 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
 
     /* Compute and apply effective build configuration (defaults → active → target) */
     cbuild__apply_config_if_needed(ctx, t);
-
-    /* Use target's cc_kind_override if set, otherwise fall back to context */
-    cbuild_cc_kind_t cc_kind = cbuild_target_cc_kind(ctx, t);
 
     if (t->type == TARGET_DUMMY) {
         cbuild__log_step(ctx, "DUMMY", CBUILD_COLOR_MAGENTA, "%s", t->name);
@@ -1310,6 +1519,8 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
         obj_files[i] = strdup(objname);
     }
+    /* Sort object files to stabilize build results */
+    qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
 
     int needs_link = compiled_sources > 0;
     cbuild_mtime_t out_mtime;
@@ -1344,349 +1555,41 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         }
     }
 
+    cbuild_argv_t argv;
+    cbuild_argv_init(&argv);
+    cbuild__link_argv(ctx, t, obj_files, obj_count, &argv);
+    char* link_sig = cbuild__link_signature(&argv);
+    char link_sig_path[1024];
+    snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
+
     /* If timestamps say "up-to-date", also verify the link command signature */
     if (!needs_link) {
-        char* link_sig = NULL;
-        cbuild_argv_t largv;
-        cbuild_argv_init(&largv);
-
-        const char* ld = cbuild_target_linker(ctx, t);
-        if (t->type == TARGET_STATIC_LIB) {
-            cbuild_argv_append(&largv, ctx->ar);
-            if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
-                char out_arg[1024];
-                snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
-                cbuild_argv_append(&largv, out_arg);
-            } else {
-                cbuild_argv_append(&largv, "rcs");
-                cbuild_argv_append(&largv, t->output_file);
-            }
-            char** tmp_objs = (char**)malloc(sizeof(char*) * obj_count);
-            for (int i = 0; i < obj_count; ++i) tmp_objs[i] = obj_files[i];
-            qsort(tmp_objs, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i) cbuild_argv_append(&largv, tmp_objs[i]);
-            free(tmp_objs);
-        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-            cbuild_argv_append(&largv, ld);
-            if (cc_kind == CBUILD_CC_MSVC) {
-                cbuild_argv_append(&largv, "/nologo");
-                char fe_arg[1024];
-                snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
-                cbuild_argv_append(&largv, fe_arg);
-            } else {
-                cbuild_argv_append(&largv, "-o");
-                cbuild_argv_append(&largv, t->output_file);
-            }
-
-            char** tmp_objs = (char**)malloc(sizeof(char*) * obj_count);
-            for (int i = 0; i < obj_count; ++i) tmp_objs[i] = obj_files[i];
-            qsort(tmp_objs, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i) cbuild_argv_append(&largv, tmp_objs[i]);
-            free(tmp_objs);
-
-            if (t->lib_dir_count > 0) {
-                char** tmp = (char**)malloc(sizeof(char*) * t->lib_dir_count);
-                for (int i = 0; i < t->lib_dir_count; ++i) tmp[i] = t->lib_dirs[i];
-                qsort(tmp, t->lib_dir_count, sizeof(char*), cbuild__strcmp_wrapper);
-                for (int i = 0; i < t->lib_dir_count; ++i) {
-                    char lib_arg[1024];
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", tmp[i]);
-                    } else {
-                        snprintf(lib_arg, sizeof(lib_arg), "-L%s", tmp[i]);
-                    }
-                    cbuild_argv_append(&largv, lib_arg);
-                }
-                free(tmp);
-            }
-
-            if (t->exposed_lib_count > 0) {
-                if (cc_kind != CBUILD_CC_MSVC) {
-#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
-                    cbuild_argv_append(&largv, "-Wl,-E");
-#endif
-                }
-            }
-
-            if (t->exposed_lib_count > 0) {
-                char** tmp = (char**)malloc(sizeof(char*) * t->exposed_lib_count);
-                for (int i = 0; i < t->exposed_lib_count; ++i) tmp[i] = t->exposed_libs[i];
-                qsort(tmp, t->exposed_lib_count, sizeof(char*), cbuild__strcmp_wrapper);
-                for (int i = 0; i < t->exposed_lib_count; ++i) {
-                    cbuild_argv_append(&largv, tmp[i]);
-                }
-                free(tmp);
-            }
-
-            if (t->link_lib_count > 0) {
-                for (int i = 0; i < t->link_lib_count; ++i) {
-                    const char* lib = t->link_libs[i];
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        if (strchr(lib, '\\') || strchr(lib, ':')) {
-                            cbuild_argv_append(&largv, lib);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "%s.lib", lib);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    } else {
-                        if (strchr(lib, '/')) {
-                            cbuild_argv_append(&largv, lib);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "-l%s", lib);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    }
-                }
-            }
-
-            if (t->dep_count > 0) {
-                for (int i = 0; i < t->dep_count; ++i) {
-                    target_t* dep = t->dependencies[i];
-                    if (dep->type == TARGET_STATIC_LIB) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    } else if (dep->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                        /* On Windows, link against .lib import library, not .dll */
-                        char lib_path[1024];
-                        strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
-                        lib_path[sizeof(lib_path) - 1] = '\0';
-                        size_t len = strlen(lib_path);
-                        if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
-                            strcpy(lib_path + len - 4, ".lib");
-                        }
-                        cbuild_argv_append(&largv, lib_path);
-#else
-                        cbuild_argv_append(&largv, dep->output_file);
-#endif
-                    } else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
-                               cbuild__is_library_path(dep->output_file)) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    }
-                }
-            }
-
-            for (int i = 0; i < t->ldflag_count; ++i)
-                cbuild_argv_append(&largv, t->ldflags[i]);
-            for (int i = 0; i < ctx->global_ldflag_count; ++i)
-                cbuild_argv_append(&largv, ctx->global_ldflags[i]);
-
-            if (t->type == TARGET_SHARED_LIB) {
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    cbuild_argv_append(&largv, "/LD");
-                } else {
-#ifdef __APPLE__
-                    cbuild_argv_append(&largv, "-dynamiclib");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-install_name");
-                        cbuild_argv_append(&largv, soname_arg);
-                        snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
-                        cbuild_argv_append(&largv, soname_arg);
-                    }
-#else
-                    cbuild_argv_append(&largv, "-shared");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
-                        cbuild_argv_append(&largv, soname_arg);
-                    }
-#endif
-                }
-            }
-        }
-
-        for (int i = 0; i < largv.count; ++i) {
-            append_format(&link_sig, "%s\n", largv.args[i]);
-        }
-        const char* ev = getenv("LDFLAGS");
-        if (ev) append_format(&link_sig, "ENV:LDFLAGS=%s\n", ev);
-
-        cbuild_argv_free(&largv);
-
-        char link_sig_path[1024];
-        snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
-
-        int link_sig_mismatch = 0;
         FILE* lf = fopen(link_sig_path, "rb");
         if (!lf) {
-            link_sig_mismatch = 1;
+            needs_link = 1;
         } else {
             fseek(lf, 0, SEEK_END);
             long lsz = ftell(lf);
             fseek(lf, 0, SEEK_SET);
-            char* prev = (char*)malloc((size_t)lsz + 1);
+            char* prev = (lsz >= 0) ? (char*)malloc((size_t)lsz + 1) : NULL;
             if (!prev) {
-                link_sig_mismatch = 1;
+                needs_link = 1;
             } else {
                 size_t rd = fread(prev, 1, (size_t)lsz, lf);
                 prev[rd] = '\0';
-                if (strcmp(prev, link_sig ? link_sig : "") != 0) {
-                    link_sig_mismatch = 1;
-                }
+                if (strcmp(prev, link_sig ? link_sig : "") != 0) needs_link = 1;
                 free(prev);
             }
             fclose(lf);
         }
-        if (link_sig) free(link_sig);
-        if (link_sig_mismatch) {
-            needs_link = 1;
-        }
     }
+
     if (needs_link) {
         char output_dir[1024];
         get_dir_from_path(t->output_file, output_dir, sizeof(output_dir));
         ensure_dir_exists(output_dir);
 
         cbuild__log_step(ctx, "LINK", CBUILD_COLOR_YELLOW, "%s", t->output_file);
-
-        /* Build argv for linking */
-        cbuild_argv_t argv;
-        cbuild_argv_init(&argv);
-
-        const char* ld = cbuild_target_linker(ctx, t);
-        if (t->type == TARGET_STATIC_LIB) {
-            /* Use append_flags to handle archivers with spaces (e.g., "zig ar") */
-            cbuild_argv_append_flags(&argv, ctx->ar);
-            if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
-                char out_arg[1024];
-                snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
-                cbuild_argv_append(&argv, out_arg);
-            } else {
-                cbuild_argv_append(&argv, "rcs");
-                cbuild_argv_append(&argv, t->output_file);
-            }
-            /* Sort object files to stabilize build results */
-            qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i)
-                cbuild_argv_append(&argv, obj_files[i]);
-
-        } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-            /* Use append_flags to handle linkers with spaces (e.g., "zig cc -target ...") */
-            cbuild_argv_append_flags(&argv, ld);
-
-            if (cc_kind == CBUILD_CC_MSVC) {
-                cbuild_argv_append(&argv, "/nologo");
-                char fe_arg[1024];
-                snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
-                cbuild_argv_append(&argv, fe_arg);
-            } else {
-                cbuild_argv_append(&argv, "-o");
-                cbuild_argv_append(&argv, t->output_file);
-            }
-
-            /* Sort object files to stabilize build results */
-            qsort(obj_files, obj_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < obj_count; ++i)
-                cbuild_argv_append(&argv, obj_files[i]);
-
-            /* Sort library directories to stabilize build results */
-            if (t->lib_dir_count > 0)
-                qsort(t->lib_dirs, t->lib_dir_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < t->lib_dir_count; ++i) {
-                char lib_arg[1024];
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", t->lib_dirs[i]);
-                } else {
-                    snprintf(lib_arg, sizeof(lib_arg), "-L%s", t->lib_dirs[i]);
-                }
-                cbuild_argv_append(&argv, lib_arg);
-            }
-
-            if (t->exposed_lib_count > 0) {
-                // Export dynamic symbols for plugin/dlopen use
-                if (cc_kind != CBUILD_CC_MSVC) {
-#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
-                    cbuild_argv_append(&argv, "-Wl,-E");
-#endif
-                }
-            }
-
-            /* Sort exposed libraries to stabilize build results */
-            if (t->exposed_lib_count > 0)
-                qsort(t->exposed_libs, t->exposed_lib_count, sizeof(char*), cbuild__strcmp_wrapper);
-            for (int i = 0; i < t->exposed_lib_count; ++i) {
-                cbuild_argv_append(&argv, t->exposed_libs[i]);
-            }
-
-            for (int i = 0; i < t->link_lib_count; ++i) {
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    /* Skip 'm' (math) library on MSVC - it's part of the CRT */
-                    if (strcmp(t->link_libs[i], "m") == 0) continue;
-                    if (strchr(t->link_libs[i], '\\') || strchr(t->link_libs[i], ':')) {
-                        cbuild_argv_append(&argv, t->link_libs[i]);
-                    } else {
-                        char lib_arg[512];
-                        snprintf(lib_arg, sizeof(lib_arg), "%s.lib", t->link_libs[i]);
-                        cbuild_argv_append(&argv, lib_arg);
-                    }
-                } else {
-                    if (strchr(t->link_libs[i], '/')) {
-                        cbuild_argv_append(&argv, t->link_libs[i]);
-                    } else {
-                        char lib_arg[512];
-                        snprintf(lib_arg, sizeof(lib_arg), "-l%s", t->link_libs[i]);
-                        cbuild_argv_append(&argv, lib_arg);
-                    }
-                }
-            }
-
-            for (int i = 0; i < t->dep_count; ++i) {
-                target_t* dep = t->dependencies[i];
-                if (dep->type == TARGET_STATIC_LIB) {
-                    cbuild_argv_append(&argv, dep->output_file);
-                } else if (dep->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                    /* On Windows, link against .lib import library, not .dll */
-                    char lib_path[1024];
-                    strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
-                    lib_path[sizeof(lib_path) - 1] = '\0';
-                    size_t len = strlen(lib_path);
-                    if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
-                        strcpy(lib_path + len - 4, ".lib");
-                    }
-                    cbuild_argv_append(&argv, lib_path);
-#else
-                    cbuild_argv_append(&argv, dep->output_file);
-#endif
-                }
-                // FILE_DEP is linkable iff its output looks like a library path.
-                else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
-                         cbuild__is_library_path(dep->output_file)) {
-                    cbuild_argv_append(&argv, dep->output_file);
-                }
-            }
-
-            for (int i = 0; i < t->ldflag_count; ++i)
-                cbuild_argv_append(&argv, t->ldflags[i]);
-            for (int i = 0; i < ctx->global_ldflag_count; ++i)
-                cbuild_argv_append(&argv, ctx->global_ldflags[i]);
-
-            if (t->type == TARGET_SHARED_LIB) {
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    cbuild_argv_append(&argv, "/LD");
-                } else {
-#ifdef __APPLE__
-                    cbuild_argv_append(&argv, "-dynamiclib");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-install_name");
-                        cbuild_argv_append(&argv, soname_arg);
-                        snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
-                        cbuild_argv_append(&argv, soname_arg);
-                    }
-#else
-                    cbuild_argv_append(&argv, "-shared");
-                    if (t->soname) {
-                        char soname_arg[1024];
-                        snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
-                        cbuild_argv_append(&argv, soname_arg);
-                    }
-#endif
-                }
-            }
-        }
 
         // Print command in verbose mode before executing
         if (ctx->verbose) {
@@ -1704,10 +1607,8 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
             cbuild__log(ctx, CBUILD_LOG_VERBOSE, "%s", cmd_buf);
         }
 
-        int rc;
         char* output = NULL;
-        rc = cbuild_spawn_process(ctx, &argv, 1, &output);
-        cbuild_argv_free(&argv);
+        int rc = cbuild_spawn_process(ctx, &argv, 1, &output);
 
         if (output && rc != 0) {
             fwrite(output, 1, strlen(output), stderr);
@@ -1718,162 +1619,19 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
         if (rc != 0) {
             cbuild__log_status(ctx, 0, "Linking failed for %s", t->output_file);
             *error_flag = 1;
-            goto cleanup;
         } else {
             t->rebuilt = 1;
             /* On successful link, write signature of the link command */
-            char* link_sig = NULL;
-            cbuild_argv_t largv;
-            cbuild_argv_init(&largv);
-
-            const char* ld2 = cbuild_target_linker(ctx, t);
-            if (t->type == TARGET_STATIC_LIB) {
-                cbuild_argv_append(&largv, ctx->ar);
-                if (detect_ar_kind(ctx->ar) == CBUILD_CC_MSVC) {
-                    char out_arg[1024];
-                    snprintf(out_arg, sizeof(out_arg), "/OUT:%s", t->output_file);
-                    cbuild_argv_append(&largv, out_arg);
-                } else {
-                    cbuild_argv_append(&largv, "rcs");
-                    cbuild_argv_append(&largv, t->output_file);
-                }
-                /* object files were already sorted before linking */
-                for (int i = 0; i < obj_count; ++i)
-                    cbuild_argv_append(&largv, obj_files[i]);
-
-            } else if (t->type == TARGET_EXECUTABLE || t->type == TARGET_SHARED_LIB) {
-                cbuild_argv_append(&largv, ld2);
-
-                if (cc_kind == CBUILD_CC_MSVC) {
-                    cbuild_argv_append(&largv, "/nologo");
-                    char fe_arg[1024];
-                    snprintf(fe_arg, sizeof(fe_arg), "/Fe:%s", t->output_file);
-                    cbuild_argv_append(&largv, fe_arg);
-                } else {
-                    cbuild_argv_append(&largv, "-o");
-                    cbuild_argv_append(&largv, t->output_file);
-                }
-
-                for (int i = 0; i < obj_count; ++i)
-                    cbuild_argv_append(&largv, obj_files[i]);
-
-                for (int i = 0; i < t->lib_dir_count; ++i) {
-                    char lib_arg[1024];
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        snprintf(lib_arg, sizeof(lib_arg), "/LIBPATH:%s", t->lib_dirs[i]);
-                    } else {
-                        snprintf(lib_arg, sizeof(lib_arg), "-L%s", t->lib_dirs[i]);
-                    }
-                    cbuild_argv_append(&largv, lib_arg);
-                }
-
-                if (t->exposed_lib_count > 0) {
-                    if (cc_kind != CBUILD_CC_MSVC) {
-#if defined(__linux__) || defined(__unix__) && !defined(__APPLE__)
-                        cbuild_argv_append(&largv, "-Wl,-E");
-#endif
-                    }
-                }
-
-                for (int i = 0; i < t->exposed_lib_count; ++i) {
-                    cbuild_argv_append(&largv, t->exposed_libs[i]);
-                }
-
-                for (int i = 0; i < t->link_lib_count; ++i) {
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        /* Skip 'm' (math) library on MSVC - it's part of the CRT */
-                        if (strcmp(t->link_libs[i], "m") == 0) continue;
-                        if (strchr(t->link_libs[i], '\\') || strchr(t->link_libs[i], ':')) {
-                            cbuild_argv_append(&largv, t->link_libs[i]);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "%s.lib", t->link_libs[i]);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    } else {
-                        if (strchr(t->link_libs[i], '/')) {
-                            cbuild_argv_append(&largv, t->link_libs[i]);
-                        } else {
-                            char lib_arg[512];
-                            snprintf(lib_arg, sizeof(lib_arg), "-l%s", t->link_libs[i]);
-                            cbuild_argv_append(&largv, lib_arg);
-                        }
-                    }
-                }
-
-                for (int i = 0; i < t->dep_count; ++i) {
-                    target_t* dep = t->dependencies[i];
-                    if (dep->type == TARGET_STATIC_LIB) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    } else if (dep->type == TARGET_SHARED_LIB) {
-#ifdef _WIN32
-                        /* On Windows, link against .lib import library, not .dll */
-                        char lib_path[1024];
-                        strncpy(lib_path, dep->output_file, sizeof(lib_path) - 1);
-                        lib_path[sizeof(lib_path) - 1] = '\0';
-                        size_t len = strlen(lib_path);
-                        if (len > 4 && strcmp(lib_path + len - 4, ".dll") == 0) {
-                            strcpy(lib_path + len - 4, ".lib");
-                        }
-                        cbuild_argv_append(&largv, lib_path);
-#else
-                        cbuild_argv_append(&largv, dep->output_file);
-#endif
-                    } else if (dep->type == TARGET_FILE_DEP && dep->output_file &&
-                               cbuild__is_library_path(dep->output_file)) {
-                        cbuild_argv_append(&largv, dep->output_file);
-                    }
-                }
-
-                for (int i = 0; i < t->ldflag_count; ++i)
-                    cbuild_argv_append(&largv, t->ldflags[i]);
-                for (int i = 0; i < ctx->global_ldflag_count; ++i)
-                    cbuild_argv_append(&largv, ctx->global_ldflags[i]);
-
-                if (t->type == TARGET_SHARED_LIB) {
-                    if (cc_kind == CBUILD_CC_MSVC) {
-                        cbuild_argv_append(&largv, "/LD");
-                    } else {
-#ifdef __APPLE__
-                        cbuild_argv_append(&largv, "-dynamiclib");
-                        if (t->soname) {
-                            char soname_arg[1024];
-                            snprintf(soname_arg, sizeof(soname_arg), "-install_name");
-                            cbuild_argv_append(&largv, soname_arg);
-                            snprintf(soname_arg, sizeof(soname_arg), "@rpath/%s", t->soname);
-                            cbuild_argv_append(&largv, soname_arg);
-                        }
-#else
-                        cbuild_argv_append(&largv, "-shared");
-                        if (t->soname) {
-                            char soname_arg[1024];
-                            snprintf(soname_arg, sizeof(soname_arg), "-Wl,-soname,%s", t->soname);
-                            cbuild_argv_append(&largv, soname_arg);
-                        }
-#endif
-                    }
-                }
-            }
-
-            for (int i = 0; i < largv.count; ++i) {
-                append_format(&link_sig, "%s\n", largv.args[i]);
-            }
-            const char* lev = getenv("LDFLAGS");
-            if (lev) append_format(&link_sig, "ENV:LDFLAGS=%s\n", lev);
-
-            char link_sig_path[1024];
-            snprintf(link_sig_path, sizeof(link_sig_path), "%s.link.sig", t->output_file);
             FILE* lf = fopen(link_sig_path, "wb");
             if (lf) {
                 fwrite(link_sig ? link_sig : "", 1, link_sig ? strlen(link_sig) : 0, lf);
                 fclose(lf);
             }
-            if (link_sig) free(link_sig);
-            cbuild_argv_free(&largv);
         }
     }
 
-cleanup:
+    free(link_sig);
+    cbuild_argv_free(&argv);
     for (int i = 0; i < obj_count; ++i)
         free(obj_files[i]);
     free(obj_files);
@@ -2152,6 +1910,47 @@ static int cbuild__flag_on_run(const char* v, void* u) {
     return 0;
 }
 
+static int cbuild__flag_on_test(const char* v, void* u) {
+    (void)v;
+    ((cbuild_context_t*)u)->run_tests = 1;
+    return 0;
+}
+
+static int cbuild__flag_on_list_tests(const char* v, void* u) {
+    (void)v;
+    ((cbuild_context_t*)u)->list_tests = 1;
+    return 0;
+}
+
+static int cbuild__append_test_selection(cbuild_context_t* ctx, const char* flag, const char* v,
+                                         char*** list, int* count, int* cap) {
+    if (!v || !*v) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: --%s requires a value", flag);
+        return 1;
+    }
+    ensure_capacity_charpp(ctx, list, count, cap);
+    (*list)[(*count)++] = strdup(v);
+    return 0;
+}
+
+static int cbuild__flag_on_test_label(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    return cbuild__append_test_selection(ctx, "test-label", v, &ctx->test_labels, &ctx->test_label_count,
+                                         &ctx->test_label_cap);
+}
+
+static int cbuild__flag_on_test_filter(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    return cbuild__append_test_selection(ctx, "test-filter", v, &ctx->test_filters, &ctx->test_filter_count,
+                                         &ctx->test_filter_cap);
+}
+
+static int cbuild__flag_on_test_exclude(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    return cbuild__append_test_selection(ctx, "test-exclude", v, &ctx->test_excludes, &ctx->test_exclude_count,
+                                         &ctx->test_exclude_cap);
+}
+
 static int cbuild__flag_on_version(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
@@ -2172,7 +1971,7 @@ int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv) {
 
     cbuild_register_flag(ctx, "verbose", 'v', 0, CBUILD_FLAG_PRE, "Verbose output", cbuild__flag_on_verbose, ctx);
     cbuild_register_flag_int(ctx, "jobs", 'j', CBUILD_FLAG_PRE,
-                             "Number of parallel compile jobs", &ctx->parallel_jobs);
+                             "Number of parallel compile and test jobs", &ctx->parallel_jobs);
     cbuild_register_flag(ctx, "target", 't', 1, CBUILD_FLAG_PRE,
                          "Build only the specified target", cbuild__flag_on_target, ctx);
     cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
@@ -2184,8 +1983,9 @@ int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv) {
     if (rc == CBUILD_FLAG_EXIT) return CBUILD_FLAG_EXIT;
     if (rc) return rc;
 
-    if (argc > 1) {
-        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
+    int first = -1;
+    if (cbuild__positional_args(ctx, argc, argv, &first) > 0) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[first]);
         return 1;
     }
 
@@ -2199,7 +1999,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
 
     cbuild_register_flag(ctx, "verbose", 'v', 0, CBUILD_FLAG_PRE, "Verbose output", cbuild__flag_on_verbose, ctx);
     cbuild_register_flag_int(ctx, "jobs", 'j', CBUILD_FLAG_PRE,
-                             "Number of parallel compile jobs", &ctx->parallel_jobs);
+                             "Number of parallel compile and test jobs", &ctx->parallel_jobs);
     cbuild_register_flag(ctx, "target", 't', 1, CBUILD_FLAG_PRE,
                          "Build only the specified target", cbuild__flag_on_target, ctx);
     cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
@@ -2216,6 +2016,18 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
                          "Remove build outputs and exit", cbuild__flag_on_clean, ctx);
     cbuild_register_flag(ctx, "run", 'r', 1, CBUILD_FLAG_PRE,
                          "Run a registered subcommand after building its target", cbuild__flag_on_run, ctx);
+    cbuild_register_flag(ctx, "test", 0, 0, CBUILD_FLAG_PRE,
+                         "Build what the tests need, then run them", cbuild__flag_on_test, ctx);
+    cbuild_register_flag(ctx, "list-tests", 0, 0, CBUILD_FLAG_PRE,
+                         "List the selected tests and exit", cbuild__flag_on_list_tests, ctx);
+    cbuild_register_flag(ctx, "test-label", 0, 1, CBUILD_FLAG_PRE,
+                         "Only tests with this label (repeatable)", cbuild__flag_on_test_label, ctx);
+    cbuild_register_flag(ctx, "test-filter", 0, 1, CBUILD_FLAG_PRE,
+                         "Only tests whose name matches this wildcard (repeatable)", cbuild__flag_on_test_filter, ctx);
+    cbuild_register_flag(ctx, "test-exclude", 0, 1, CBUILD_FLAG_PRE,
+                         "Skip tests whose name matches this wildcard (repeatable)", cbuild__flag_on_test_exclude, ctx);
+    cbuild_register_flag_int(ctx, "test-timeout", 0, CBUILD_FLAG_PRE,
+                             "Seconds before a test without its own limit fails", &ctx->test_timeout);
     cbuild_register_flag(ctx, "version", 0, 0, CBUILD_FLAG_PRE, "Show version and exit", cbuild__flag_on_version, ctx);
     cbuild_register_flag(ctx, "help", 'h', 0, CBUILD_FLAG_PRE, "Show help and exit", cbuild__flag_on_help, ctx);
 
@@ -2226,20 +2038,39 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
     cbuild__resolve_target_paths(ctx);
 
     /* A single bare argument naming a registered subcommand is shorthand for --run=NAME. */
-    if (argc == 2 && !ctx->run_subcmd) {
+    int first = -1;
+    int positional = cbuild__positional_args(ctx, argc, argv, &first);
+    if (positional == 1 && !ctx->run_subcmd) {
         for (int i = 0; i < ctx->subcommand_count; i++) {
-            if (strcmp(ctx->subcommands[i]->name, argv[1]) == 0) {
-                ctx->run_subcmd = argv[1];
-                argc = 1;
+            if (strcmp(ctx->subcommands[i]->name, argv[first]) == 0) {
+                ctx->run_subcmd = argv[first];
+                for (int k = first; k < argc; ++k) argv[k] = argv[k + 1];
+                argc--;
+                positional = 0;
                 break;
             }
         }
     }
 
-    if (argc > 1) {
-        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
+    if (positional > 0) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[first]);
         cbuild__log(ctx, CBUILD_LOG_INFO, "hint: use flags or a subcommand name (try --help)");
         return 1;
+    }
+
+    if (ctx->list_tests) {
+        cbuild__list_tests(ctx);
+        return 0;
+    }
+
+    if (ctx->run_tests && !ctx->run_subcmd) {
+        rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_BEFORE_BUILD, &argc, &argv);
+        if (rc == CBUILD_FLAG_EXIT) return 0;
+        if (rc) return rc;
+        if (cbuild__run_selected_tests(ctx) != 0) return 1;
+        rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_AFTER_BUILD, &argc, &argv);
+        if (rc == CBUILD_FLAG_EXIT) return 0;
+        return rc;
     }
 
     if (ctx->run_subcmd) {
@@ -4151,6 +3982,8 @@ void cbuild_teardown(cbuild_context_t* ctx) {
     ctx->subcommand_count = 0;
     ctx->subcommand_cap = 0;
 
+    cbuild__free_tests(ctx);
+
     // Free subprojects
     if (ctx->subprojects) {
         for (int i = 0; i < ctx->subproject_count; ++i) {
@@ -4405,10 +4238,36 @@ int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_nam
     return 0;
 }
 
+const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, char short_name) {
+    const char* value = NULL;
+    size_t long_len = long_name ? strlen(long_name) : 0;
+    for (int i = 1; i < argc; i++) {
+        const char* arg = argv[i];
+        if (!arg || arg[0] != '-') continue;
+        if (strcmp(arg, "--") == 0) break;
+
+        if (arg[1] == '-') {
+            if (!long_name || strncmp(arg + 2, long_name, long_len) != 0) continue;
+            const char* rest = arg + 2 + long_len;
+            if (*rest == '=') {
+                value = rest + 1;
+            } else if (*rest == '\0' && i + 1 < argc) {
+                value = argv[++i];
+            }
+        } else if (short_name && arg[1] == short_name) {
+            if (arg[2]) {
+                value = arg + 2;
+            } else if (i + 1 < argc) {
+                value = argv[++i];
+            }
+        }
+    }
+    return value;
+}
+
 CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
-    char buf[4096];
-    int pos = 0;
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "Usage: %s [flags]\n\nFlags:", ctx->argv0_for_help);
+    /* One log call per line: the logger formats into a fixed-size buffer. */
+    cbuild__log(ctx, CBUILD_LOG_INFO, "Usage: %s [flags] [subcommand]\n\nFlags:", ctx->argv0_for_help);
     const char* phase_names[] = { "Pre-parse", "Before build", "After build" };
     for (int ph = CBUILD_FLAG_PRE; ph <= CBUILD_FLAG_AFTER_BUILD; ++ph) {
         int header = 0;
@@ -4416,31 +4275,79 @@ CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
             cbuild_flag_handler_t* fh = &ctx->flag_handlers[i];
             if (fh->phase != (cbuild_flag_phase_t)ph) continue;
             if (!header) {
-                pos += snprintf(buf + pos, sizeof(buf) - pos, "\n\n  %s:\n", phase_names[ph]);
+                cbuild__log(ctx, CBUILD_LOG_INFO, "\n  %s:", phase_names[ph]);
                 header = 1;
             }
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "    ");
-            if (fh->short_name) pos += snprintf(buf + pos, sizeof(buf) - pos, "-%c", fh->short_name);
-            if (fh->short_name && fh->long_name) pos += snprintf(buf + pos, sizeof(buf) - pos, ", ");
-            if (fh->long_name) pos += snprintf(buf + pos, sizeof(buf) - pos, "--%s", fh->long_name);
-            if (fh->takes_value) pos += snprintf(buf + pos, sizeof(buf) - pos, " <val>");
-            if (fh->help) pos += snprintf(buf + pos, sizeof(buf) - pos, "\n        %s", fh->help);
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "\n");
+            char short_part[8] = "";
+            if (fh->short_name) snprintf(short_part, sizeof(short_part), "-%c%s", fh->short_name,
+                                         fh->long_name ? ", " : "");
+            cbuild__log(ctx, CBUILD_LOG_INFO, "    %s%s%s%s", short_part, fh->long_name ? "--" : "",
+                        fh->long_name ? fh->long_name : "", fh->takes_value ? " <val>" : "");
+            if (fh->help) cbuild__log(ctx, CBUILD_LOG_INFO, "        %s", fh->help);
         }
     }
     if (ctx->subcommand_count > 0) {
-        pos += snprintf(buf + pos, sizeof(buf) - pos, "\nSubcommands:\n");
+        cbuild__log(ctx, CBUILD_LOG_INFO, "\nSubcommands:");
         for (int i = 0; i < ctx->subcommand_count; ++i) {
-            pos += snprintf(buf + pos, sizeof(buf) - pos, "    %s\n", ctx->subcommands[i]->name);
+            cbuild__log(ctx, CBUILD_LOG_INFO, "    %s", ctx->subcommands[i]->name);
         }
     }
-    cbuild__log(ctx, CBUILD_LOG_INFO, "%s", buf);
+}
+
+/* The handler registered for a flag token in any phase, or NULL. For a short
+   cluster, the first letter decides. */
+static cbuild_flag_handler_t* cbuild__find_any_phase(cbuild_context_t* ctx, const char* arg) {
+    if (arg[1] == '-') {
+        const char* name = arg + 2;
+        size_t n = strcspn(name, "=");
+        for (int i = 0; i < ctx->flag_count; ++i) {
+            cbuild_flag_handler_t* fh = &ctx->flag_handlers[i];
+            if (fh->long_name && strlen(fh->long_name) == n && strncmp(fh->long_name, name, n) == 0) return fh;
+        }
+        return NULL;
+    }
+    for (int i = 0; i < ctx->flag_count; ++i) {
+        if (ctx->flag_handlers[i].short_name == arg[1]) return &ctx->flag_handlers[i];
+    }
+    return NULL;
+}
+
+/* Whether a flag token takes the following argument as its value. */
+static int cbuild__flag_uses_next(cbuild_flag_handler_t* fh, const char* arg) {
+    if (!fh->takes_value) return 0;
+    if (arg[1] == '-') return strchr(arg, '=') == NULL;
+    return arg[2] == '\0';
+}
+
+/* Counts the arguments that are not flags (or flag values) left for a later
+   phase, storing the index of the first in *first (-1 if none). */
+CBUILD_INTERNAL int cbuild__positional_args(cbuild_context_t* ctx, int argc, char** argv, int* first) {
+    int count = 0;
+    int stop = 0;
+    *first = -1;
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+        if (!arg) continue;
+        if (!stop && strcmp(arg, "--") == 0) {
+            stop = 1;
+            continue;
+        }
+        if (!stop && arg[0] == '-' && arg[1] != '\0') {
+            cbuild_flag_handler_t* fh = cbuild__find_any_phase(ctx, arg);
+            if (fh && cbuild__flag_uses_next(fh, arg)) i++;
+            continue;
+        }
+        if (*first < 0) *first = i;
+        count++;
+    }
+    return count;
 }
 
 /* strict dispatcher:
    - consumes handled flags from argv (compacting)
+   - leaves flags registered for another phase, and their values, in place
    - errors on any unknown token that *looks* like a flag (- or --)
-   - honors "--" to stop flag parsing
+   - honors "--" to stop flag parsing (and keeps it for later phases)
 */
 CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_flag_phase_t phase,
                                                  int* argc, char*** argvp) {
@@ -4458,7 +4365,16 @@ CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_f
         }
 
         if (strcmp(arg, "--") == 0) {
+            av[write++] = av[read];
             stop = 1;
+            continue;
+        }
+
+        /* Another phase's flag waits for that phase's dispatch. */
+        cbuild_flag_handler_t* other = cbuild__find_any_phase(ctx, arg);
+        if (other && other->phase != phase) {
+            av[write++] = av[read];
+            if (cbuild__flag_uses_next(other, arg) && read + 1 < ac) av[write++] = av[++read];
             continue;
         }
 
@@ -4722,9 +4638,13 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
     *files = NULL;
     *file_count = 0;
 
-    const char* last_slash = strrchr(pattern, '/');
-    const char* last_backslash = strrchr(pattern, '\\');
-    const char* separator = last_slash ? last_slash : last_backslash;
+    /* Search from the deepest directory named before the first wildcard, so
+     * wildcards in directory names, recursive ones included, can match. */
+    const char* wild = strpbrk(pattern, "*?");
+    const char* separator = NULL;
+    for (const char* p = pattern; *p && (!wild || p < wild); ++p) {
+        if (*p == '/' || *p == '\\') separator = p;
+    }
 
     if (!separator) {
         strcpy(dir_path, ".");
@@ -4743,6 +4663,11 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
 
     int result = cbuild_expand_wildcard_recursive(dir_path, base_pattern, files,
                                                   file_count, &capacity);
+
+    /* Directory order varies between machines and runs; sorting keeps builds reproducible. */
+    if (result == 0 && *file_count > 1) {
+        qsort(*files, *file_count, sizeof(char*), cbuild__strcmp_wrapper);
+    }
 
     if (result != 0 && *files) {
         for (int i = 0; i < *file_count; i++) {
@@ -4781,16 +4706,15 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
                                      char*** files, int* file_count,
                                      int* capacity) {
     int recursive_search = 0;
-    char next_pattern[PATH_MAX] = { 0 };
 
     if (strncmp(pattern, "**", 2) == 0) {
+        /* "**" spans zero or more directories: the rest of the pattern applies
+         * here, and the whole pattern again in every subdirectory below. */
+        const char* rest = pattern + 2;
+        if (*rest == '/' || *rest == '\\') rest++;
+        if (cbuild_expand_wildcard_recursive(dir_path, *rest ? rest : "*", files, file_count, capacity) != 0)
+            return -1;
         recursive_search = 1;
-
-        if (pattern[2] == '/' || pattern[2] == '\\') {
-            strcpy(next_pattern, pattern + 3);
-        } else {
-            strcpy(next_pattern, pattern + 2);
-        }
     }
 
 #ifdef _WIN32
@@ -4818,11 +4742,6 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (recursive_search) {
-                if (next_pattern[0]) {
-                    cbuild_expand_wildcard_recursive(full_path, next_pattern, files,
-                                                     file_count, capacity);
-                }
-
                 cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count,
                                                  capacity);
             } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {
@@ -4873,11 +4792,6 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
         struct stat st;
         if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
             if (recursive_search) {
-                if (next_pattern[0]) {
-                    cbuild_expand_wildcard_recursive(full_path, next_pattern, files,
-                                                     file_count, capacity);
-                }
-
                 cbuild_expand_wildcard_recursive(full_path, pattern, files, file_count,
                                                  capacity);
             } else if (strchr(pattern, '/') || strchr(pattern, '\\')) {
@@ -5622,6 +5536,22 @@ CBUILD_INTERNAL int cbuild_spawn_process(cbuild_context_t* ctx, cbuild_argv_t* a
     }
     return -1;
 #endif
+}
+
+int cbuild_spawn(cbuild_context_t* ctx, const char* const* argv, int argc, char** output) {
+    if (output) *output = NULL;
+    if (!ctx || !argv || argc <= 0 || !argv[0]) return -1;
+    cbuild_argv_t av;
+    cbuild_argv_init(&av);
+    for (int i = 0; i < argc; ++i) {
+        if (cbuild_argv_append(&av, argv[i]) != 0) {
+            cbuild_argv_free(&av);
+            return -1;
+        }
+    }
+    int rc = cbuild_spawn_process(ctx, &av, output != NULL, output);
+    cbuild_argv_free(&av);
+    return rc;
 }
 
 /* Legacy shell-based command execution (deprecated, kept for compatibility) */
@@ -6495,6 +6425,571 @@ static target_t* cbuild_create_target(cbuild_context_t* ctx, const char* name,
     ensure_capacity_charpp(ctx, (char***)&ctx->targets, &ctx->target_count, &ctx->target_cap);
     ctx->targets[ctx->target_count++] = t;
     return t;
+}
+
+/* ---- src/test.c ---- */
+
+/* test.c - test registration and the parallel test runner. */
+
+
+enum { CBUILD_TEST_PENDING, CBUILD_TEST_RUNNING, CBUILD_TEST_DONE };
+enum { CBUILD_TEST_PASS, CBUILD_TEST_FAIL, CBUILD_TEST_SKIP };
+
+test_t* cbuild_add_test(cbuild_context_t* ctx, const char* name, target_t* target,
+                        const char* const* args, int argc) {
+    if (!ctx || !name || !*name || argc < 0 || (argc > 0 && !args)) {
+        if (ctx) cbuild__set_error(ctx, "Invalid argument to cbuild_add_test");
+        return NULL;
+    }
+    if (!(target && target->type == TARGET_EXECUTABLE) && argc == 0) {
+        cbuild__set_error(ctx, "Test '%s' needs an executable target or a program in args[0]", name);
+        return NULL;
+    }
+    test_t* test = (test_t*)calloc(1, sizeof(test_t));
+    if (!test) {
+        cbuild__set_error(ctx, "Out of memory in cbuild_add_test");
+        return NULL;
+    }
+    test->name = strdup(name);
+    test->target = target;
+    test->skip_code = -1;
+    test->argc = argc;
+    test->args = (char**)calloc((size_t)argc + 1, sizeof(char*));
+    for (int i = 0; i < argc; ++i) test->args[i] = strdup(args[i]);
+    ensure_capacity_charpp(ctx, (char***)&ctx->tests, &ctx->test_count, &ctx->test_cap);
+    ctx->tests[ctx->test_count++] = test;
+    return test;
+}
+
+void cbuild_test_add_dependency(cbuild_context_t* ctx, test_t* test, target_t* target) {
+    if (!test || !target) return;
+    ensure_capacity_charpp(ctx, (char***)&test->deps, &test->dep_count, &test->dep_cap);
+    test->deps[test->dep_count++] = target;
+}
+
+void cbuild_test_add_label(cbuild_context_t* ctx, test_t* test, const char* label) {
+    if (!test || !label || !*label) return;
+    ensure_capacity_charpp(ctx, &test->labels, &test->label_count, &test->label_cap);
+    test->labels[test->label_count++] = strdup(label);
+}
+
+void cbuild_test_set_skip_code(cbuild_context_t* ctx, test_t* test, int exit_code) {
+    (void)ctx;
+    if (test) test->skip_code = exit_code;
+}
+
+void cbuild_test_set_timeout(cbuild_context_t* ctx, test_t* test, int seconds) {
+    (void)ctx;
+    if (test) test->timeout = seconds > 0 ? seconds : 0;
+}
+
+void cbuild_test_set_lock(cbuild_context_t* ctx, test_t* test, const char* lock) {
+    (void)ctx;
+    if (!test) return;
+    free(test->lock);
+    test->lock = (lock && *lock) ? strdup(lock) : NULL;
+}
+
+CBUILD_INTERNAL void cbuild__free_tests(cbuild_context_t* ctx) {
+    for (int i = 0; i < ctx->test_count; ++i) {
+        test_t* test = ctx->tests[i];
+        if (!test) continue;
+        free(test->name);
+        for (int j = 0; j < test->argc; ++j) free(test->args[j]);
+        free(test->args);
+        free(test->deps);
+        for (int j = 0; j < test->label_count; ++j) free(test->labels[j]);
+        free(test->labels);
+        free(test->lock);
+        free(test);
+    }
+    free(ctx->tests);
+    ctx->tests = NULL;
+    ctx->test_count = 0;
+    ctx->test_cap = 0;
+
+    char*** lists[] = { &ctx->test_labels, &ctx->test_filters, &ctx->test_excludes };
+    int* counts[] = { &ctx->test_label_count, &ctx->test_filter_count, &ctx->test_exclude_count };
+    int* caps[] = { &ctx->test_label_cap, &ctx->test_filter_cap, &ctx->test_exclude_cap };
+    for (int l = 0; l < 3; ++l) {
+        for (int i = 0; i < *counts[l]; ++i) free((*lists[l])[i]);
+        free(*lists[l]);
+        *lists[l] = NULL;
+        *counts[l] = 0;
+        *caps[l] = 0;
+    }
+    ctx->run_tests = 0;
+    ctx->list_tests = 0;
+    ctx->test_timeout = 0;
+}
+
+/* Selected when it has one of the requested labels (if any), matches one of
+ * the name filters (if any), and matches no exclusion. */
+static int cbuild__test_selected(cbuild_context_t* ctx, test_t* test) {
+    if (ctx->test_label_count > 0) {
+        int found = 0;
+        for (int i = 0; i < ctx->test_label_count && !found; ++i) {
+            for (int j = 0; j < test->label_count; ++j) {
+                if (strcmp(ctx->test_labels[i], test->labels[j]) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        if (!found) return 0;
+    }
+    if (ctx->test_filter_count > 0) {
+        int found = 0;
+        for (int i = 0; i < ctx->test_filter_count; ++i) {
+            if (cbuild_match_wildcard(ctx->test_filters[i], test->name)) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) return 0;
+    }
+    for (int i = 0; i < ctx->test_exclude_count; ++i) {
+        if (cbuild_match_wildcard(ctx->test_excludes[i], test->name)) return 0;
+    }
+    return 1;
+}
+
+static const char* cbuild__test_program(test_t* test) {
+    if (test->target && test->target->type == TARGET_EXECUTABLE) return test->target->output_file;
+    return test->args[0];
+}
+
+static int cbuild__test_program_is_target(test_t* test) {
+    return test->target && test->target->type == TARGET_EXECUTABLE;
+}
+
+CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx) {
+    int shown = 0;
+    cbuild__log(ctx, CBUILD_LOG_INFO, "Available tests:");
+    for (int i = 0; i < ctx->test_count; ++i) {
+        test_t* test = ctx->tests[i];
+        if (!cbuild__test_selected(ctx, test)) continue;
+        char* labels = NULL;
+        for (int j = 0; j < test->label_count; ++j) {
+            append_format(&labels, "%s%s", j ? "," : "", test->labels[j]);
+        }
+        if (labels) {
+            cbuild__log(ctx, CBUILD_LOG_INFO, "  %-40s  [%s]", test->name, labels);
+        } else {
+            cbuild__log(ctx, CBUILD_LOG_INFO, "  %s", test->name);
+        }
+        free(labels);
+        shown++;
+    }
+    if (shown == 0) cbuild__log(ctx, CBUILD_LOG_INFO, "  (no tests)");
+}
+
+/* ---------------- Running one test ---------------- */
+
+static double cbuild__now_seconds(void) {
+#ifdef _WIN32
+    return (double)GetTickCount64() / 1000.0;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+#endif
+}
+
+static void cbuild__sleep_ms(int ms) {
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
+typedef struct {
+    cbuild_context_t* ctx;
+    test_t** tests;
+    int* state;
+    int* result;
+    int count;
+    int started;
+    int finished;
+    int passed, failed, skipped;
+    char* log_dir;
+#ifdef _WIN32
+    CRITICAL_SECTION mutex;
+    CRITICAL_SECTION spawn_mutex;
+#else
+    pthread_mutex_t mutex;
+#endif
+} cbuild_test_run_t;
+
+static void cbuild__test_run_lock(cbuild_test_run_t* run) {
+#ifdef _WIN32
+    EnterCriticalSection(&run->mutex);
+#else
+    pthread_mutex_lock(&run->mutex);
+#endif
+}
+
+static void cbuild__test_run_unlock(cbuild_test_run_t* run) {
+#ifdef _WIN32
+    LeaveCriticalSection(&run->mutex);
+#else
+    pthread_mutex_unlock(&run->mutex);
+#endif
+}
+
+/* Runs argv with stdin from the null device and stdout and stderr in log_path.
+ * Returns the exit status, -1 if it could not be started, and sets *timed_out
+ * when the process was killed for exceeding timeout seconds. */
+static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, const char* log_path,
+                                int timeout, int* timed_out) {
+    *timed_out = 0;
+#ifdef _WIN32
+    /* Handles marked inheritable leak into any process created meanwhile, so
+     * they only exist inside this critical section. */
+    EnterCriticalSection(&run->spawn_mutex);
+    SECURITY_ATTRIBUTES sa = { 0 };
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE out = CreateFileA(log_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE in = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                            OPEN_EXISTING, 0, NULL);
+    if (out == INVALID_HANDLE_VALUE || in == INVALID_HANDLE_VALUE) {
+        if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+        if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
+        LeaveCriticalSection(&run->spawn_mutex);
+        return -1;
+    }
+    STARTUPINFOA si = { 0 };
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = in;
+    si.hStdOutput = out;
+    si.hStdError = out;
+    PROCESS_INFORMATION pi = { 0 };
+    char* cmdline = cbuild_argv_to_cmdline(argv);
+    BOOL ok = cmdline && CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    free(cmdline);
+    CloseHandle(out);
+    CloseHandle(in);
+    LeaveCriticalSection(&run->spawn_mutex);
+    if (!ok) return -1;
+
+    DWORD wait = WaitForSingleObject(pi.hProcess, timeout > 0 ? (DWORD)timeout * 1000 : INFINITE);
+    if (wait == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        *timed_out = 1;
+    }
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return (int)exit_code;
+#else
+    (void)run;
+    /* O_CLOEXEC keeps these out of processes other workers start meanwhile;
+     * dup2 in the child clears it on the standard descriptors. */
+    int out = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (out < 0 || in < 0) {
+        if (out >= 0) close(out);
+        if (in >= 0) close(in);
+        return -1;
+    }
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, in, STDIN_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, out, STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, out, STDERR_FILENO);
+    pid_t pid;
+    int spawn_rc = posix_spawnp(&pid, argv->args[0], &actions, NULL, argv->args, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(out);
+    close(in);
+    if (spawn_rc != 0) return -1;
+
+    double deadline = timeout > 0 ? cbuild__now_seconds() + timeout : 0;
+    int delay_ms = 1;
+    int status = 0;
+    for (;;) {
+        pid_t r = waitpid(pid, &status, timeout > 0 ? WNOHANG : 0);
+        if (r == pid) break;
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (cbuild__now_seconds() >= deadline) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            *timed_out = 1;
+            break;
+        }
+        cbuild__sleep_ms(delay_ms);
+        if (delay_ms < 50) delay_ms *= 2;
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+#endif
+}
+
+static char* cbuild__read_text_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char* text = size >= 0 ? (char*)malloc((size_t)size + 1) : NULL;
+    if (text) {
+        size_t n = fread(text, 1, (size_t)size, f);
+        text[n] = '\0';
+    }
+    fclose(f);
+    return text;
+}
+
+static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
+    cbuild_context_t* ctx = run->ctx;
+    test_t* test = run->tests[index];
+
+    char* log_path = NULL;
+    append_format(&log_path, "%s/", run->log_dir);
+    for (const char* p = test->name; *p; ++p) {
+        char c = (isalnum((unsigned char)*p) || *p == '.' || *p == '-' || *p == '_') ? *p : '_';
+        append_format(&log_path, "%c", c);
+    }
+    append_format(&log_path, ".log");
+
+    cbuild_argv_t argv;
+    cbuild_argv_init(&argv);
+    char* program = strdup(cbuild__test_program(test));
+#ifdef _WIN32
+    /* CreateProcess resolves the program from the command line, which wants native separators. */
+    for (char* p = program; p && *p; ++p) {
+        if (*p == '/') *p = '\\';
+    }
+#endif
+    cbuild_argv_append(&argv, program);
+    free(program);
+    for (int i = cbuild__test_program_is_target(test) ? 0 : 1; i < test->argc; ++i) {
+        cbuild_argv_append(&argv, test->args[i]);
+    }
+
+    int timeout = test->timeout > 0 ? test->timeout : ctx->test_timeout;
+    int timed_out = 0;
+    double start = cbuild__now_seconds();
+    int rc = cbuild__spawn_logged(run, &argv, log_path, timeout, &timed_out);
+    double elapsed = cbuild__now_seconds() - start;
+    cbuild_argv_free(&argv);
+
+    int result = CBUILD_TEST_FAIL;
+    char detail[128] = "";
+    if (timed_out) {
+        snprintf(detail, sizeof(detail), ", timed out after %ds", timeout);
+    } else if (rc == 0) {
+        result = CBUILD_TEST_PASS;
+    } else if (test->skip_code >= 0 && rc == test->skip_code) {
+        result = CBUILD_TEST_SKIP;
+    } else if (rc < 0) {
+        snprintf(detail, sizeof(detail), ", could not start %s", cbuild__test_program(test));
+    } else {
+        snprintf(detail, sizeof(detail), ", exit code %d", rc);
+    }
+
+    cbuild__test_run_lock(run);
+    run->result[index] = result;
+    run->state[index] = CBUILD_TEST_DONE;
+    run->finished++;
+    if (result == CBUILD_TEST_PASS) run->passed++;
+    if (result == CBUILD_TEST_FAIL) run->failed++;
+    if (result == CBUILD_TEST_SKIP) run->skipped++;
+    const char* label = result == CBUILD_TEST_PASS ? "PASS" : result == CBUILD_TEST_SKIP ? "SKIP" : "FAIL";
+    cbuild__log_step(ctx, label, CBUILD_COLOR_BLUE, "[%d/%d] %s (%.2fs%s)", run->finished, run->count,
+                     test->name, elapsed, detail);
+    if (result == CBUILD_TEST_FAIL) {
+        char* text = cbuild__read_text_file(log_path);
+        if (text && *text) {
+            fwrite(text, 1, strlen(text), stderr);
+            if (text[strlen(text) - 1] != '\n') fputc('\n', stderr);
+            fflush(stderr);
+        }
+        free(text);
+    }
+    cbuild__test_run_unlock(run);
+    free(log_path);
+}
+
+/* Next pending test whose lock no running test holds, or -1. Caller holds the mutex. */
+static int cbuild__next_runnable_test(cbuild_test_run_t* run) {
+    for (int i = 0; i < run->count; ++i) {
+        if (run->state[i] != CBUILD_TEST_PENDING) continue;
+        const char* lock = run->tests[i]->lock;
+        int blocked = 0;
+        for (int j = 0; lock && j < run->count && !blocked; ++j) {
+            if (run->state[j] == CBUILD_TEST_RUNNING && run->tests[j]->lock &&
+                strcmp(run->tests[j]->lock, lock) == 0) {
+                blocked = 1;
+            }
+        }
+        if (!blocked) return i;
+    }
+    return -1;
+}
+
+#ifdef _WIN32
+static DWORD WINAPI cbuild__test_worker(void* arg) {
+#else
+static void* cbuild__test_worker(void* arg) {
+#endif
+    cbuild_test_run_t* run = (cbuild_test_run_t*)arg;
+    for (;;) {
+        cbuild__test_run_lock(run);
+        if (run->started >= run->count) {
+            cbuild__test_run_unlock(run);
+            break;
+        }
+        int index = cbuild__next_runnable_test(run);
+        if (index >= 0) {
+            run->state[index] = CBUILD_TEST_RUNNING;
+            run->started++;
+        }
+        cbuild__test_run_unlock(run);
+        if (index < 0) {
+            cbuild__sleep_ms(5);  /* everything left waits on a lock */
+            continue;
+        }
+        cbuild__run_one_test(run, index);
+    }
+#ifdef _WIN32
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+/* Builds what the selected tests need, then runs them. Returns 0 when nothing failed. */
+CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
+    cbuild_test_run_t run;
+    memset(&run, 0, sizeof(run));
+    run.ctx = ctx;
+    run.tests = (test_t**)calloc((size_t)ctx->test_count + 1, sizeof(test_t*));
+    for (int i = 0; i < ctx->test_count; ++i) {
+        if (cbuild__test_selected(ctx, ctx->tests[i])) run.tests[run.count++] = ctx->tests[i];
+    }
+    if (run.count == 0) {
+        cbuild__log(ctx, CBUILD_LOG_WARNING, "cbuild: no tests selected");
+        free(run.tests);
+        return 0;
+    }
+
+    /* Build first: a test can only start once everything it needs exists. */
+    int error_flag = 0;
+    free(ctx->visited);
+    free(ctx->in_stack);
+    ctx->visited = (int*)calloc((size_t)ctx->target_count + 1, sizeof(int));
+    ctx->in_stack = (int*)calloc((size_t)ctx->target_count + 1, sizeof(int));
+    for (int i = 0; i < run.count && !error_flag; ++i) {
+        if (run.tests[i]->target) dfs_build_func(ctx, run.tests[i]->target, &error_flag);
+        for (int j = 0; j < run.tests[i]->dep_count && !error_flag; ++j) {
+            dfs_build_func(ctx, run.tests[i]->deps[j], &error_flag);
+        }
+    }
+    free(ctx->visited);
+    ctx->visited = NULL;
+    free(ctx->in_stack);
+    ctx->in_stack = NULL;
+    if (error_flag) {
+        cbuild__log_status(ctx, 0, "Build failed; tests not run.");
+        free(run.tests);
+        return -1;
+    }
+
+    const char* output_dir = ctx->active_config && ctx->active_config->output_dir
+                                 ? ctx->active_config->output_dir
+                                 : ctx->output_dir;
+    append_format(&run.log_dir, "%s/tests", output_dir);
+    ensure_dir_exists(run.log_dir);
+
+    run.state = (int*)calloc((size_t)run.count, sizeof(int));
+    run.result = (int*)calloc((size_t)run.count, sizeof(int));
+    int thread_count = ctx->parallel_jobs < run.count ? ctx->parallel_jobs : run.count;
+    if (thread_count < 1) thread_count = 1;
+#ifdef _WIN32
+    /* WaitForMultipleObjects joins at most this many threads. */
+    if (thread_count > MAXIMUM_WAIT_OBJECTS) thread_count = MAXIMUM_WAIT_OBJECTS;
+#endif
+
+    cbuild__log_step(ctx, "TEST", CBUILD_COLOR_BLUE, "Running %d test%s with %d job%s", run.count,
+                     run.count == 1 ? "" : "s", thread_count, thread_count == 1 ? "" : "s");
+    double start = cbuild__now_seconds();
+
+#ifdef _WIN32
+    InitializeCriticalSection(&run.mutex);
+    InitializeCriticalSection(&run.spawn_mutex);
+    HANDLE* threads = (HANDLE*)malloc(sizeof(HANDLE) * thread_count);
+    for (int i = 0; i < thread_count; ++i) {
+        threads[i] = CreateThread(NULL, 0, cbuild__test_worker, &run, 0, NULL);
+    }
+    WaitForMultipleObjects(thread_count, threads, TRUE, INFINITE);
+    for (int i = 0; i < thread_count; ++i) CloseHandle(threads[i]);
+    DeleteCriticalSection(&run.spawn_mutex);
+    DeleteCriticalSection(&run.mutex);
+#else
+    pthread_mutex_init(&run.mutex, NULL);
+    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * thread_count);
+    for (int i = 0; i < thread_count; ++i) {
+        pthread_create(&threads[i], NULL, cbuild__test_worker, &run);
+    }
+    for (int i = 0; i < thread_count; ++i) pthread_join(threads[i], NULL);
+    pthread_mutex_destroy(&run.mutex);
+#endif
+    free(threads);
+
+    double elapsed = cbuild__now_seconds() - start;
+    if (run.failed > 0) {
+        cbuild__log(ctx, CBUILD_LOG_INFO, "Failed tests (logs in %s):", run.log_dir);
+        for (int i = 0; i < run.count; ++i) {
+            if (run.result[i] == CBUILD_TEST_FAIL) cbuild__log(ctx, CBUILD_LOG_INFO, "  %s", run.tests[i]->name);
+        }
+    }
+    cbuild__log_status(ctx, run.failed == 0, "Tests: %d passed, %d failed, %d skipped (%.1fs)", run.passed,
+                       run.failed, run.skipped, elapsed);
+
+    int failed = run.failed;
+    free(run.state);
+    free(run.result);
+    free(run.tests);
+    free(run.log_dir);
+    return failed ? -1 : 0;
+}
+
+int cbuild_run_tests(cbuild_context_t* ctx, const char* label, const char* pattern) {
+    if (!ctx) return -1;
+    cbuild_init(ctx);
+    cbuild__resolve_target_paths(ctx);
+
+    /* Narrow the selection for this call only. */
+    int added_label = 0, added_filter = 0;
+    if (label && *label) {
+        ensure_capacity_charpp(ctx, &ctx->test_labels, &ctx->test_label_count, &ctx->test_label_cap);
+        ctx->test_labels[ctx->test_label_count++] = strdup(label);
+        added_label = 1;
+    }
+    if (pattern && *pattern) {
+        ensure_capacity_charpp(ctx, &ctx->test_filters, &ctx->test_filter_count, &ctx->test_filter_cap);
+        ctx->test_filters[ctx->test_filter_count++] = strdup(pattern);
+        added_filter = 1;
+    }
+    int rc = cbuild__run_selected_tests(ctx);
+    if (added_label) free(ctx->test_labels[--ctx->test_label_count]);
+    if (added_filter) free(ctx->test_filters[--ctx->test_filter_count]);
+    return rc;
 }
 
 /* ---- src/toolchain.c ---- */

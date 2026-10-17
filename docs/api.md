@@ -24,6 +24,7 @@ Release tags exactly match `CBUILD_VERSION`. The numeric macros are suitable for
 | `command_t` | Shell, argv, or callback command |
 | `subproject_t` | Registered CBuild subproject |
 | `config_t` | Reusable build configuration |
+| `test_t` | Registered test program |
 | `cbuild_log_level_t` | Logger message classification |
 | `cbuild_flag_phase_t` | Custom flag execution phase |
 
@@ -217,6 +218,49 @@ void cbuild_register_subcommand(cbuild_context_t *ctx, const char *name,
 
 A registered subcommand can use a command line, a callback, or both, and can optionally require a target to be built first. Run it with `--run=NAME`, `-r NAME`, or just its name as the only positional argument (`./cbuild NAME`).
 
+## Tests
+
+```c
+test_t *cbuild_add_test(cbuild_context_t *ctx, const char *name,
+                        target_t *target, const char *const *args, int argc);
+void cbuild_test_add_dependency(cbuild_context_t *ctx, test_t *test,
+                                target_t *target);
+void cbuild_test_add_label(cbuild_context_t *ctx, test_t *test,
+                           const char *label);
+void cbuild_test_set_skip_code(cbuild_context_t *ctx, test_t *test,
+                               int exit_code);
+void cbuild_test_set_timeout(cbuild_context_t *ctx, test_t *test,
+                             int seconds);
+void cbuild_test_set_lock(cbuild_context_t *ctx, test_t *test,
+                          const char *lock);
+int cbuild_run_tests(cbuild_context_t *ctx, const char *label,
+                     const char *pattern);
+```
+
+When `target` is an executable, the test runs its output with `args` as the arguments; otherwise `args[0]` names the program. The target and any added dependencies are built before tests start. Exit code 0 passes, the skip code (if set) skips, and anything else, including a timeout, fails. Tests that share a lock never run at the same time.
+
+`./cbuild --test` builds what the selected tests need and runs them on `-j` workers. Standard input is the null device, and each test's output goes to `<output dir>/tests/<name>.log`; the output of a failed test is also printed. Options:
+
+| Option | Effect |
+| --- | --- |
+| `--test` | Build and run the selected tests; exit 1 if any failed |
+| `--list-tests` | List the selected tests and their labels |
+| `--test-label=LABEL` | Only tests with one of these labels (repeatable) |
+| `--test-filter=PATTERN` | Only tests whose name matches one of these wildcards (repeatable) |
+| `--test-exclude=PATTERN` | Leave out tests whose name matches (repeatable) |
+| `--test-timeout=SECONDS` | Limit for tests without their own |
+
+`cbuild_run_tests` does the same without the CLI, narrowed to `label` and `pattern` when they are not `NULL`, and returns `0` when nothing failed and `-1` otherwise.
+
+## Processes
+
+```c
+int cbuild_spawn(cbuild_context_t *ctx, const char *const *argv, int argc,
+                 char **output);
+```
+
+Runs `argv[0]` with its arguments, without a shell, and waits for it. When `output` is not `NULL`, standard output and error are captured into a `malloc`'d string (`NULL` if the program printed nothing) that the caller frees. Returns the exit status; a program that could not be started reports `-1` (`127` on Linux).
+
 ## Custom flags
 
 ```c
@@ -233,7 +277,11 @@ void cbuild_register_flag_str(cbuild_context_t *, const char *, char,
                               const char **out);
 int cbuild_has_flag(int argc, char **argv, const char *long_name,
                     char short_name);
+const char *cbuild_get_flag_value(int argc, char **argv,
+                                  const char *long_name, char short_name);
 ```
+
+`cbuild_has_flag` and `cbuild_get_flag_value` scan `argv` directly, so a build can read options that shape the graph before defining targets. Register the same flags too, so `cbuild_run` accepts them and `--help` lists them. `cbuild_get_flag_value` returns the last of `--name=VALUE`, `--name VALUE`, `-xVALUE`, or `-x VALUE` before any `--`, or `NULL`.
 
 The phases are `CBUILD_FLAG_PRE`, `CBUILD_FLAG_BEFORE_BUILD`, and `CBUILD_FLAG_AFTER_BUILD`. A callback can return `CBUILD_FLAG_EXIT` after handling an early-exit operation successfully.
 

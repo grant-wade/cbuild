@@ -17,7 +17,8 @@ The test suite is intentionally toolchain-free beyond a C/C++ compiler, Python 3
 - Parallel builds and no-op incremental builds
 - Header dependency and compile-signature invalidation
 - `compile_commands.json` generation and JSON parsing
-- Target listing/filtering, graph and reverse-dependency output, manifests, custom flags, and subcommands
+- Target listing/filtering, graph and reverse-dependency output, manifests, custom flags (in every phase), and subcommands
+- Tests: listing, label and name selection, passing, skipped, failing, and timed-out tests, logs, and `cbuild_spawn`
 - Self-rebuilding build programs
 - Rebuild-correctness regressions (`tests/regress`, all platforms): paths containing spaces, edits made within a second of the previous build, removed headers, failed compilation, changed flags, deleted intermediate outputs, repeated no-op builds, explicit output paths, generator dependencies, and command dependency cycles
 - `--clean` safety: symbolic links and Windows junctions, files outside the build outputs, and output directories that contain the project

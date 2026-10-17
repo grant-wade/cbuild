@@ -66,6 +66,18 @@ static void generate_header(void *user_data) {
     fclose(file);
 }
 
+/* Exercises cbuild_spawn: run the built app and capture what it prints. */
+static int spawn_check(const char *value, void *user_data) {
+    (void)value;
+    cbuild_context_t *ctx = (cbuild_context_t *)user_data;
+    const char *args[] = { TEST_APP_PATH, "--exit", "4" };
+    char *output = NULL;
+    int rc = cbuild_spawn(ctx, args, 3, &output);
+    printf("spawn rc=%d output=%s", rc, output ? output : "(none)\n");
+    free(output);
+    return rc == 4 ? 0 : 1;
+}
+
 static int enable_feature(const char *value, void *user_data) {
     (void)value;
     feature_binding_t *binding = (feature_binding_t *)user_data;
@@ -140,6 +152,45 @@ int main(int argc, char **argv) {
                          "Build test_app with FEATURE_VALUE=1",
                          enable_feature, &feature_binding);
     cbuild_register_subcommand(ctx, "app", app, TEST_RUN_COMMAND, NULL, NULL);
+    cbuild_register_flag(ctx, "spawn-check", 0, 0, CBUILD_FLAG_AFTER_BUILD,
+                         "Run the built app through cbuild_spawn", spawn_check, ctx);
+
+    const char *self_test_args[] = { "--self-test" };
+    test_t *passing = cbuild_add_test(ctx, "app_self_test", app, self_test_args, 1);
+    cbuild_test_add_label(ctx, passing, "unit");
+    cbuild_test_add_dependency(ctx, passing, shared);
+    cbuild_test_set_lock(ctx, passing, "app");
+
+    const char *skip_args[] = { "--exit", "125" };
+    test_t *skipped = cbuild_add_test(ctx, "app_skip", app, skip_args, 2);
+    cbuild_test_add_label(ctx, skipped, "unit");
+    cbuild_test_set_skip_code(ctx, skipped, 125);
+    cbuild_test_set_lock(ctx, skipped, "app");
+
+    const char *by_path_args[] = { TEST_APP_PATH, "--exit", "0" };
+    test_t *by_path = cbuild_add_test(ctx, "app_by_path", NULL, by_path_args, 3);
+    cbuild_test_add_dependency(ctx, by_path, app);
+
+    /* Failing tests exist only on request, so the default --test run passes.
+     * Reading the exit status before the graph exists exercises cbuild_get_flag_value. */
+    int failing_tests = 0;
+    cbuild_register_flag_bool(ctx, "failing-tests", 0, CBUILD_FLAG_PRE,
+                              "Also register tests that fail", &failing_tests);
+    const char *fail_code = NULL;
+    cbuild_register_flag_str(ctx, "fail-code", 0, CBUILD_FLAG_PRE,
+                             "Exit status of the failing test", &fail_code);
+    if (cbuild_has_flag(argc, argv, "failing-tests", 0)) {
+        const char *code = cbuild_get_flag_value(argc, argv, "fail-code", 0);
+        const char *fail_args[] = { "--exit", code ? code : "1" };
+        test_t *failing = cbuild_add_test(ctx, "app_fails", app, fail_args, 2);
+        cbuild_test_add_label(ctx, failing, "failing");
+        cbuild_test_set_skip_code(ctx, failing, 125);
+
+        const char *spin_args[] = { "--spin", "30" };
+        test_t *slow = cbuild_add_test(ctx, "app_timeout", app, spin_args, 2);
+        cbuild_test_add_label(ctx, slow, "failing");
+        cbuild_test_set_timeout(ctx, slow, 1);
+    }
 
     int result = cbuild_run(ctx, argc, argv);
     cbuild_context_free(ctx);

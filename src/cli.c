@@ -270,6 +270,47 @@ static int cbuild__flag_on_run(const char* v, void* u) {
     return 0;
 }
 
+static int cbuild__flag_on_test(const char* v, void* u) {
+    (void)v;
+    ((cbuild_context_t*)u)->run_tests = 1;
+    return 0;
+}
+
+static int cbuild__flag_on_list_tests(const char* v, void* u) {
+    (void)v;
+    ((cbuild_context_t*)u)->list_tests = 1;
+    return 0;
+}
+
+static int cbuild__append_test_selection(cbuild_context_t* ctx, const char* flag, const char* v,
+                                         char*** list, int* count, int* cap) {
+    if (!v || !*v) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: --%s requires a value", flag);
+        return 1;
+    }
+    ensure_capacity_charpp(ctx, list, count, cap);
+    (*list)[(*count)++] = strdup(v);
+    return 0;
+}
+
+static int cbuild__flag_on_test_label(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    return cbuild__append_test_selection(ctx, "test-label", v, &ctx->test_labels, &ctx->test_label_count,
+                                         &ctx->test_label_cap);
+}
+
+static int cbuild__flag_on_test_filter(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    return cbuild__append_test_selection(ctx, "test-filter", v, &ctx->test_filters, &ctx->test_filter_count,
+                                         &ctx->test_filter_cap);
+}
+
+static int cbuild__flag_on_test_exclude(const char* v, void* u) {
+    cbuild_context_t* ctx = (cbuild_context_t*)u;
+    return cbuild__append_test_selection(ctx, "test-exclude", v, &ctx->test_excludes, &ctx->test_exclude_count,
+                                         &ctx->test_exclude_cap);
+}
+
 static int cbuild__flag_on_version(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
@@ -290,7 +331,7 @@ int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv) {
 
     cbuild_register_flag(ctx, "verbose", 'v', 0, CBUILD_FLAG_PRE, "Verbose output", cbuild__flag_on_verbose, ctx);
     cbuild_register_flag_int(ctx, "jobs", 'j', CBUILD_FLAG_PRE,
-                             "Number of parallel compile jobs", &ctx->parallel_jobs);
+                             "Number of parallel compile and test jobs", &ctx->parallel_jobs);
     cbuild_register_flag(ctx, "target", 't', 1, CBUILD_FLAG_PRE,
                          "Build only the specified target", cbuild__flag_on_target, ctx);
     cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
@@ -302,8 +343,9 @@ int cbuild_configure_from_argv(cbuild_context_t* ctx, int argc, char** argv) {
     if (rc == CBUILD_FLAG_EXIT) return CBUILD_FLAG_EXIT;
     if (rc) return rc;
 
-    if (argc > 1) {
-        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
+    int first = -1;
+    if (cbuild__positional_args(ctx, argc, argv, &first) > 0) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[first]);
         return 1;
     }
 
@@ -317,7 +359,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
 
     cbuild_register_flag(ctx, "verbose", 'v', 0, CBUILD_FLAG_PRE, "Verbose output", cbuild__flag_on_verbose, ctx);
     cbuild_register_flag_int(ctx, "jobs", 'j', CBUILD_FLAG_PRE,
-                             "Number of parallel compile jobs", &ctx->parallel_jobs);
+                             "Number of parallel compile and test jobs", &ctx->parallel_jobs);
     cbuild_register_flag(ctx, "target", 't', 1, CBUILD_FLAG_PRE,
                          "Build only the specified target", cbuild__flag_on_target, ctx);
     cbuild_register_flag(ctx, "compile-commands", 0, 0, CBUILD_FLAG_PRE,
@@ -334,6 +376,18 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
                          "Remove build outputs and exit", cbuild__flag_on_clean, ctx);
     cbuild_register_flag(ctx, "run", 'r', 1, CBUILD_FLAG_PRE,
                          "Run a registered subcommand after building its target", cbuild__flag_on_run, ctx);
+    cbuild_register_flag(ctx, "test", 0, 0, CBUILD_FLAG_PRE,
+                         "Build what the tests need, then run them", cbuild__flag_on_test, ctx);
+    cbuild_register_flag(ctx, "list-tests", 0, 0, CBUILD_FLAG_PRE,
+                         "List the selected tests and exit", cbuild__flag_on_list_tests, ctx);
+    cbuild_register_flag(ctx, "test-label", 0, 1, CBUILD_FLAG_PRE,
+                         "Only tests with this label (repeatable)", cbuild__flag_on_test_label, ctx);
+    cbuild_register_flag(ctx, "test-filter", 0, 1, CBUILD_FLAG_PRE,
+                         "Only tests whose name matches this wildcard (repeatable)", cbuild__flag_on_test_filter, ctx);
+    cbuild_register_flag(ctx, "test-exclude", 0, 1, CBUILD_FLAG_PRE,
+                         "Skip tests whose name matches this wildcard (repeatable)", cbuild__flag_on_test_exclude, ctx);
+    cbuild_register_flag_int(ctx, "test-timeout", 0, CBUILD_FLAG_PRE,
+                             "Seconds before a test without its own limit fails", &ctx->test_timeout);
     cbuild_register_flag(ctx, "version", 0, 0, CBUILD_FLAG_PRE, "Show version and exit", cbuild__flag_on_version, ctx);
     cbuild_register_flag(ctx, "help", 'h', 0, CBUILD_FLAG_PRE, "Show help and exit", cbuild__flag_on_help, ctx);
 
@@ -344,20 +398,39 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
     cbuild__resolve_target_paths(ctx);
 
     /* A single bare argument naming a registered subcommand is shorthand for --run=NAME. */
-    if (argc == 2 && !ctx->run_subcmd) {
+    int first = -1;
+    int positional = cbuild__positional_args(ctx, argc, argv, &first);
+    if (positional == 1 && !ctx->run_subcmd) {
         for (int i = 0; i < ctx->subcommand_count; i++) {
-            if (strcmp(ctx->subcommands[i]->name, argv[1]) == 0) {
-                ctx->run_subcmd = argv[1];
-                argc = 1;
+            if (strcmp(ctx->subcommands[i]->name, argv[first]) == 0) {
+                ctx->run_subcmd = argv[first];
+                for (int k = first; k < argc; ++k) argv[k] = argv[k + 1];
+                argc--;
+                positional = 0;
                 break;
             }
         }
     }
 
-    if (argc > 1) {
-        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[1]);
+    if (positional > 0) {
+        cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: unexpected argument '%s'", argv[first]);
         cbuild__log(ctx, CBUILD_LOG_INFO, "hint: use flags or a subcommand name (try --help)");
         return 1;
+    }
+
+    if (ctx->list_tests) {
+        cbuild__list_tests(ctx);
+        return 0;
+    }
+
+    if (ctx->run_tests && !ctx->run_subcmd) {
+        rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_BEFORE_BUILD, &argc, &argv);
+        if (rc == CBUILD_FLAG_EXIT) return 0;
+        if (rc) return rc;
+        if (cbuild__run_selected_tests(ctx) != 0) return 1;
+        rc = cbuild_dispatch_flags_strict(ctx, CBUILD_FLAG_AFTER_BUILD, &argc, &argv);
+        if (rc == CBUILD_FLAG_EXIT) return 0;
+        return rc;
     }
 
     if (ctx->run_subcmd) {

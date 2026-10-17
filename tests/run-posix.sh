@@ -141,6 +141,34 @@ touch build.c
 ./cbuild --list > self-rebuild.log
 grep -q "Detected changes" self-rebuild.log
 
+# Tests: selection, pass, skip, failure exit status, and timeouts.
+./cbuild --list-tests > list-tests.log
+grep -q "app_self_test" list-tests.log
+grep -q "unit" list-tests.log
+if grep -q "app_fails" list-tests.log; then
+    echo "Failing test registered without --failing-tests" >&2
+    exit 1
+fi
+./cbuild --test -j2 > test-run.log
+grep -q "PASS.*app_self_test" test-run.log
+grep -q "PASS.*app_by_path" test-run.log
+grep -q "SKIP.*app_skip" test-run.log
+grep -q "2 passed, 0 failed, 1 skipped" test-run.log
+./cbuild --test --test-label=unit --test-exclude='*skip' > test-label.log
+grep -q "1 passed, 0 failed, 0 skipped" test-label.log
+if ./cbuild --failing-tests --fail-code=7 --test --test-label=failing > test-fail.log 2>&1; then
+    echo "Failing tests unexpectedly passed" >&2
+    exit 1
+fi
+grep -q "FAIL.*app_fails.*exit code 7" test-fail.log
+grep -q "FAIL.*app_timeout.*timed out after 1s" test-fail.log
+grep -q "0 passed, 2 failed, 0 skipped" test-fail.log
+test -f build/tests/app_fails.log
+./cbuild --failing-tests --test --test-filter='app_*' --test-exclude=app_fails --test-exclude=app_timeout > test-filter.log
+grep -q "2 passed, 0 failed, 1 skipped" test-filter.log
+./cbuild --spawn-check > spawn-check.log
+grep -q "spawn rc=4 output=sum=5" spawn-check.log
+
 ./cbuild --clean > clean.log
 test ! -e build/test_app
 

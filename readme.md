@@ -57,6 +57,7 @@ You only compile it by hand once. `CBUILD_SELF_REBUILD` notices when `build.c` (
 - **Incremental, parallel builds.** Only what changed gets rebuilt, based on timestamps, header dependencies, and the exact compile and link commands, so changing a flag rebuilds what it should. Compiles run across all your cores, or as many as you pass to `-j`.
 - **GCC, Clang, and MSVC** on Linux, macOS, and Windows, with output names that follow each platform (`libfoo.a` vs `foo.lib`, `.so` vs `.dylib` vs `.dll`).
 - **Executables, static and shared libraries**, plus generated files and custom commands that slot into the same dependency graph.
+- **Tests** that run in parallel, with labels, skip codes, timeouts, and logs, after building exactly what they need.
 - **Build configurations** for Debug, Release, WebAssembly, or your own, written once instead of per compiler.
 - **Subprojects**: link against a target from another CBuild project.
 - **`compile_commands.json`** for clangd and friends.
@@ -72,6 +73,8 @@ You only compile it by hand once. `CBUILD_SELF_REBUILD` notices when `build.c` (
 ./cbuild --clean              # remove outputs, including subprojects'
 ./cbuild NAME                 # build and run a subcommand you registered (same as --run=NAME)
 ./cbuild --compile-commands   # write compile_commands.json
+./cbuild --test               # build what the tests need, then run them
+./cbuild --list-tests         # list tests
 ./cbuild --list               # list targets
 ./cbuild --graph              # print the build graph
 ./cbuild --deps=NAME          # show what depends on NAME
@@ -147,6 +150,17 @@ And for the things you'd otherwise put in a `run` or `test` script, register a s
 cbuild_register_subcommand(ctx, "run", app, "./build/app", NULL, NULL);
 ```
 
+### Tests
+
+```c
+const char *args[] = { "--quick" };
+test_t *unit = cbuild_add_test(ctx, "app_self_test", app, args, 1);
+cbuild_test_add_label(ctx, unit, "unit");
+cbuild_test_set_timeout(ctx, unit, 60);
+```
+
+`./cbuild --test` builds `app`, runs it with `--quick`, and fails if it exits non-zero. Tests run in parallel; `--test-label=unit`, `--test-filter='app_*'`, and `--test-exclude=...` pick which. Each test's output lands in `build/tests/<name>.log`, and a failure's output is printed too. A skip code, extra dependencies, and locks for tests that must not overlap are in [the API reference](docs/api.md#tests).
+
 ### Your own flags
 
 ```c
@@ -157,6 +171,8 @@ cbuild_register_flag_bool(
 ```
 
 That gives you `./cbuild --tests`, and it shows up in `--help`. Integer, string, and callback flags work the same way.
+
+Flags are parsed by `cbuild_run`, after your targets exist. When a flag decides which targets to define, read it first with `cbuild_has_flag(argc, argv, "tests", 0)` or `cbuild_get_flag_value(argc, argv, "name", 0)`, and register it as well so `cbuild_run` accepts it.
 
 ### Subprojects
 

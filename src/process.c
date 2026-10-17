@@ -397,6 +397,22 @@ CBUILD_INTERNAL int cbuild_spawn_process(cbuild_context_t* ctx, cbuild_argv_t* a
 #endif
 }
 
+int cbuild_spawn(cbuild_context_t* ctx, const char* const* argv, int argc, char** output) {
+    if (output) *output = NULL;
+    if (!ctx || !argv || argc <= 0 || !argv[0]) return -1;
+    cbuild_argv_t av;
+    cbuild_argv_init(&av);
+    for (int i = 0; i < argc; ++i) {
+        if (cbuild_argv_append(&av, argv[i]) != 0) {
+            cbuild_argv_free(&av);
+            return -1;
+        }
+    }
+    int rc = cbuild_spawn_process(ctx, &av, output != NULL, output);
+    cbuild_argv_free(&av);
+    return rc;
+}
+
 /* Legacy shell-based command execution (deprecated, kept for compatibility) */
 CBUILD_INTERNAL int run_command(cbuild_context_t* ctx, const char* cmd, int capture_out,
                                 char** captured_output) {

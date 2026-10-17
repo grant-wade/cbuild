@@ -20,6 +20,7 @@ and portability without external tools or scripts.
 - Sources/includes/lib-dirs and libraries; supports wildcards including ** recursive
 - Command API: pre/post target commands, argv-based execution, shell command lines, and C callbacks; command dependencies
 - Subcommands: register named actions and run them with --run
+- Tests: register test programs with labels, skip codes, timeouts, and locks; run them in parallel with --test
 - Subprojects: query targets via --manifest, build them on demand, and link as dependencies
 - compile_commands.json generation with full arguments array (for clangd, etc.)
 - Build configurations: Debug/Release presets, per-target configs, structured knobs (optimization, LTO, sanitizers, etc.)
@@ -63,6 +64,7 @@ Typical invocations:
     $ ./cbuild -j 8                   # builds with 8 parallel jobs
     $ ./cbuild --target=mytarget      # builds only the specified target
     $ ./cbuild --compile-commands     # writes compile_commands.json to the output dir
+    $ ./cbuild --test                 # builds what the tests need, then runs them
 
 4. Build Configurations
 -----------------------
@@ -196,6 +198,7 @@ typedef struct cbuild_target target_t;
 typedef struct cbuild_command command_t;
 typedef struct cbuild_subproject subproject_t;
 typedef struct cbuild_config config_t;
+typedef struct cbuild_test test_t;
 
 typedef void (*cbuild_subcommand_callback)(void* user_data);
 typedef int (*cbuild_flag_callback)(const char* value, void* user_data);
@@ -334,6 +337,27 @@ void cbuild_register_subcommand(cbuild_context_t* ctx, const char* name, target_
                                 cbuild_subcommand_callback callback,
                                 void* user_data);
 
+// *** Test API *** //
+/* Register a test. When target is an executable, the test runs its output with
+ * args as the arguments; otherwise args[0] names the program to run. Either
+ * way, target is built before the test runs. Exit code 0 passes. */
+test_t* cbuild_add_test(cbuild_context_t* ctx, const char* name, target_t* target,
+                        const char* const* args, int argc);
+/* Build another target before the test runs (a generated input, for example). */
+void cbuild_test_add_dependency(cbuild_context_t* ctx, test_t* test, target_t* target);
+/* Labels group tests for --test-label. */
+void cbuild_test_add_label(cbuild_context_t* ctx, test_t* test, const char* label);
+/* Treat this exit code as a skip rather than a failure. */
+void cbuild_test_set_skip_code(cbuild_context_t* ctx, test_t* test, int exit_code);
+/* Fail the test if it runs longer than this many seconds (0 = no limit). */
+void cbuild_test_set_timeout(cbuild_context_t* ctx, test_t* test, int seconds);
+/* Tests that share a lock name never run at the same time. */
+void cbuild_test_set_lock(cbuild_context_t* ctx, test_t* test, const char* lock);
+/* Build what the selected tests need, then run them in parallel. label and
+ * pattern (a wildcard on test names) may be NULL to select everything.
+ * Returns 0 when every selected test passed or was skipped, -1 otherwise. */
+int cbuild_run_tests(cbuild_context_t* ctx, const char* label, const char* pattern);
+
 /* Register a flag handler. */
 void cbuild_register_flag(cbuild_context_t* ctx, const char* long_name,
                           char short_name,
@@ -358,6 +382,16 @@ void cbuild_register_flag_str(cbuild_context_t* ctx, const char* long_name, char
 
 // *** Argument Parsing Helpers *** //
 int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_name);
+/* Value of the last --long_name=VALUE, --long_name VALUE, -xVALUE, or -x VALUE
+ * before any "--", or NULL. Lets a build read options before defining targets. */
+const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, char short_name);
+
+// *** Process Helpers *** //
+/* Run argv[0] with its arguments (no shell) and wait for it. When output is not
+ * NULL, stdout and stderr are captured into *output, a malloc'd string (or NULL
+ * if the program printed nothing) that the caller frees. Returns the exit
+ * status; a program that could not be started reports -1 (127 on Linux). */
+int cbuild_spawn(cbuild_context_t* ctx, const char* const* argv, int argc, char** output);
 
 // *** File System and Other Helpers *** //
 int cbuild_file_exists(const char* path);
