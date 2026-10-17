@@ -20,7 +20,6 @@ int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
         return (sum == 5 && product == 12 && GENERATED_VALUE == 7) ? 0 : 1;
     }
-    /* Test-runner fixtures: a chosen exit status, and a process that outlives its timeout. */
     if (argc > 2 && strcmp(argv[1], "--exit") == 0) {
         return atoi(argv[2]);
     }

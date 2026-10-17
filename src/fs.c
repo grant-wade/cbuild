@@ -150,8 +150,7 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
     *files = NULL;
     *file_count = 0;
 
-    /* Search from the deepest directory named before the first wildcard, so
-     * wildcards in directory names, recursive ones included, can match. */
+    /* Start at the deepest directory before the first wildcard, so directory names can match. */
     const char* wild = strpbrk(pattern, "*?");
     const char* separator = NULL;
     for (const char* p = pattern; *p && (!wild || p < wild); ++p) {
@@ -176,7 +175,6 @@ int cbuild_expand_wildcard(const char* pattern, char*** files,
     int result = cbuild_expand_wildcard_recursive(dir_path, base_pattern, files,
                                                   file_count, &capacity);
 
-    /* Directory order varies between machines and runs; sorting keeps builds reproducible. */
     if (result == 0 && *file_count > 1) {
         qsort(*files, *file_count, sizeof(char*), cbuild__strcmp_wrapper);
     }
@@ -220,8 +218,7 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
     int recursive_search = 0;
 
     if (strncmp(pattern, "**", 2) == 0) {
-        /* "**" spans zero or more directories: the rest of the pattern applies
-         * here, and the whole pattern again in every subdirectory below. */
+        /* Zero directories here, then the whole pattern again in each subdirectory. */
         const char* rest = pattern + 2;
         if (*rest == '/' || *rest == '\\') rest++;
         if (cbuild_expand_wildcard_recursive(dir_path, *rest ? rest : "*", files, file_count, capacity) != 0)

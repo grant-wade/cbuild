@@ -93,8 +93,6 @@ CBUILD_INTERNAL void cbuild__free_tests(cbuild_context_t* ctx) {
     ctx->test_timeout = 0;
 }
 
-/* Selected when it has one of the requested labels (if any), matches one of
- * the name filters (if any), and matches no exclusion. */
 static int cbuild__test_selected(cbuild_context_t* ctx, test_t* test) {
     if (ctx->test_label_count > 0) {
         int found = 0;
@@ -153,8 +151,6 @@ CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx) {
     }
     if (shown == 0) cbuild__log(ctx, CBUILD_LOG_INFO, "  (no tests)");
 }
-
-/* ---------------- Running one test ---------------- */
 
 static double cbuild__now_seconds(void) {
 #ifdef _WIN32
@@ -395,7 +391,7 @@ static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
     free(log_path);
 }
 
-/* Next pending test whose lock no running test holds, or -1. Caller holds the mutex. */
+/* Caller holds the mutex. */
 static int cbuild__next_runnable_test(cbuild_test_run_t* run) {
     for (int i = 0; i < run->count; ++i) {
         if (run->state[i] != CBUILD_TEST_PENDING) continue;
@@ -431,7 +427,7 @@ static void* cbuild__test_worker(void* arg) {
         }
         cbuild__test_run_unlock(run);
         if (index < 0) {
-            cbuild__sleep_ms(5);  /* everything left waits on a lock */
+            cbuild__sleep_ms(5);
             continue;
         }
         cbuild__run_one_test(run, index);
@@ -443,7 +439,6 @@ static void* cbuild__test_worker(void* arg) {
 #endif
 }
 
-/* Builds what the selected tests need, then runs them. Returns 0 when nothing failed. */
 CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     cbuild_test_run_t run;
     memset(&run, 0, sizeof(run));
@@ -458,7 +453,6 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
         return 0;
     }
 
-    /* Build first: a test can only start once everything it needs exists. */
     int error_flag = 0;
     free(ctx->visited);
     free(ctx->in_stack);
@@ -544,7 +538,6 @@ int cbuild_run_tests(cbuild_context_t* ctx, const char* label, const char* patte
     cbuild_init(ctx);
     cbuild__resolve_target_paths(ctx);
 
-    /* Narrow the selection for this call only. */
     int added_label = 0, added_filter = 0;
     if (label && *label) {
         ensure_capacity_charpp(ctx, &ctx->test_labels, &ctx->test_label_count, &ctx->test_label_cap);

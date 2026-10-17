@@ -112,7 +112,7 @@ const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, 
 }
 
 CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
-    /* One log call per line: the logger formats into a fixed-size buffer. */
+    /* One call per line: the logger formats into a fixed-size buffer. */
     cbuild__log(ctx, CBUILD_LOG_INFO, "Usage: %s [flags] [subcommand]\n\nFlags:", ctx->argv0_for_help);
     const char* phase_names[] = { "Pre-parse", "Before build", "After build" };
     for (int ph = CBUILD_FLAG_PRE; ph <= CBUILD_FLAG_AFTER_BUILD; ++ph) {
@@ -140,8 +140,7 @@ CBUILD_INTERNAL void cbuild__print_help(cbuild_context_t* ctx) {
     }
 }
 
-/* The handler registered for a flag token in any phase, or NULL. For a short
-   cluster, the first letter decides. */
+/* For a short cluster, the first letter decides. */
 static cbuild_flag_handler_t* cbuild__find_any_phase(cbuild_context_t* ctx, const char* arg) {
     if (arg[1] == '-') {
         const char* name = arg + 2;
@@ -158,15 +157,13 @@ static cbuild_flag_handler_t* cbuild__find_any_phase(cbuild_context_t* ctx, cons
     return NULL;
 }
 
-/* Whether a flag token takes the following argument as its value. */
 static int cbuild__flag_uses_next(cbuild_flag_handler_t* fh, const char* arg) {
     if (!fh->takes_value) return 0;
     if (arg[1] == '-') return strchr(arg, '=') == NULL;
     return arg[2] == '\0';
 }
 
-/* Counts the arguments that are not flags (or flag values) left for a later
-   phase, storing the index of the first in *first (-1 if none). */
+/* Skips flags left for later phases and their values; *first is -1 if none remain. */
 CBUILD_INTERNAL int cbuild__positional_args(cbuild_context_t* ctx, int argc, char** argv, int* first) {
     int count = 0;
     int stop = 0;
@@ -216,7 +213,6 @@ CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_f
             continue;
         }
 
-        /* Another phase's flag waits for that phase's dispatch. */
         cbuild_flag_handler_t* other = cbuild__find_any_phase(ctx, arg);
         if (other && other->phase != phase) {
             av[write++] = av[read];

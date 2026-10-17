@@ -313,7 +313,6 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
     }
 }
 
-/* Append sorted copies of items so the command, and so its signature, is stable. */
 static void cbuild__argv_append_sorted(cbuild_argv_t* argv, char** items, int count, const char* prefix) {
     if (count <= 0) return;
     char** tmp = (char**)malloc(sizeof(char*) * count);
@@ -330,8 +329,7 @@ static void cbuild__argv_append_sorted(cbuild_argv_t* argv, char** items, int co
     free(tmp);
 }
 
-/* Build the archiver or linker argv for a target. The link step and its rebuild
- * signature both go through here so they cannot drift. obj_files must be sorted. */
+/* Shared by the link and its signature so they cannot drift. obj_files must be sorted. */
 static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_files, int obj_count,
                               cbuild_argv_t* argv) {
     if (t->type == TARGET_STATIC_LIB) {
@@ -375,8 +373,7 @@ static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_fil
     }
     cbuild__argv_append_sorted(argv, t->exposed_libs, t->exposed_lib_count, NULL);
 
-    /* Our own libraries come before system libraries, so single-pass linkers
-     * can resolve their references (for example to libm) further along. */
+    /* Before system libraries, so single-pass linkers resolve their references. */
     for (int i = 0; i < t->dep_count; ++i) {
         target_t* dep = t->dependencies[i];
         if (dep->type == TARGET_STATIC_LIB) {
@@ -445,7 +442,6 @@ static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_fil
     }
 }
 
-/* Everything that must stay the same for a linked output to be reusable. */
 static char* cbuild__link_signature(cbuild_argv_t* argv) {
     char* sig = NULL;
     for (int i = 0; i < argv->count; ++i) {

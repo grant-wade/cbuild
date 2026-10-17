@@ -343,13 +343,11 @@ void cbuild_register_subcommand(cbuild_context_t* ctx, const char* name, target_
  * way, target is built before the test runs. Exit code 0 passes. */
 test_t* cbuild_add_test(cbuild_context_t* ctx, const char* name, target_t* target,
                         const char* const* args, int argc);
-/* Build another target before the test runs (a generated input, for example). */
+/* Build target before the test runs. */
 void cbuild_test_add_dependency(cbuild_context_t* ctx, test_t* test, target_t* target);
-/* Labels group tests for --test-label. */
 void cbuild_test_add_label(cbuild_context_t* ctx, test_t* test, const char* label);
-/* Treat this exit code as a skip rather than a failure. */
 void cbuild_test_set_skip_code(cbuild_context_t* ctx, test_t* test, int exit_code);
-/* Fail the test if it runs longer than this many seconds (0 = no limit). */
+/* 0 = no limit. */
 void cbuild_test_set_timeout(cbuild_context_t* ctx, test_t* test, int seconds);
 /* Tests that share a lock name never run at the same time. */
 void cbuild_test_set_lock(cbuild_context_t* ctx, test_t* test, const char* lock);
@@ -383,7 +381,7 @@ void cbuild_register_flag_str(cbuild_context_t* ctx, const char* long_name, char
 // *** Argument Parsing Helpers *** //
 int cbuild_has_flag(int argc, char** argv, const char* long_name, char short_name);
 /* Value of the last --long_name=VALUE, --long_name VALUE, -xVALUE, or -x VALUE
- * before any "--", or NULL. Lets a build read options before defining targets. */
+ * before any "--", or NULL. */
 const char* cbuild_get_flag_value(int argc, char** argv, const char* long_name, char short_name);
 
 // *** Process Helpers *** //

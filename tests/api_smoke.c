@@ -59,7 +59,6 @@ int main(void) {
     for (int i = 0; i < file_count; ++i) free(files[i]);
     free(files);
 
-    /* "**" spans zero or more directories, and results come back sorted. */
     assert(cbuild_expand_wildcard("example/**/*.c", &files, &file_count) == 0);
     assert(file_count == 5);
     assert(strcmp(files[0], "example/build.c") == 0);

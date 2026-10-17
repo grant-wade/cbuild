@@ -66,7 +66,6 @@ static void generate_header(void *user_data) {
     fclose(file);
 }
 
-/* Exercises cbuild_spawn: run the built app and capture what it prints. */
 static int spawn_check(const char *value, void *user_data) {
     (void)value;
     cbuild_context_t *ctx = (cbuild_context_t *)user_data;
@@ -171,8 +170,7 @@ int main(int argc, char **argv) {
     test_t *by_path = cbuild_add_test(ctx, "app_by_path", NULL, by_path_args, 3);
     cbuild_test_add_dependency(ctx, by_path, app);
 
-    /* Failing tests exist only on request, so the default --test run passes.
-     * Reading the exit status before the graph exists exercises cbuild_get_flag_value. */
+    /* Only on request, so the default --test run passes. */
     int failing_tests = 0;
     cbuild_register_flag_bool(ctx, "failing-tests", 0, CBUILD_FLAG_PRE,
                               "Also register tests that fail", &failing_tests);
