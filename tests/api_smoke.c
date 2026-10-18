@@ -30,7 +30,56 @@ static void count_logger(void *user_data, cbuild_log_level_t level,
     log_count++;
 }
 
+typedef struct {
+    char text[65536];
+    size_t length;
+} listing_t;
+
+static void capture_listing(void *user_data, cbuild_log_level_t level,
+                            const char *message) {
+    listing_t *listing = (listing_t *)user_data;
+    size_t length = strlen(message);
+    assert(level == CBUILD_LOG_INFO);
+    assert(listing->length + length + 2 <= sizeof(listing->text));
+    memcpy(listing->text + listing->length, message, length);
+    listing->length += length;
+    listing->text[listing->length++] = '\n';
+    listing->text[listing->length] = '\0';
+}
+
+static void test_target_listing(const char *flag, int target_count) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    assert(ctx != NULL);
+    listing_t listing = { { 0 }, 0 };
+    cbuild_set_logger(ctx, capture_listing, &listing);
+    for (int i = 0; i < target_count; ++i) {
+        char name[64], output[128];
+        snprintf(name, sizeof(name), "listing_target_%04d", i);
+        snprintf(output, sizeof(output), "build/generated_%04d.h", i);
+        assert((i % 2 ? cbuild_file_dep_target(ctx, name, output)
+                      : cbuild_dummy_target(ctx, name)) != NULL);
+    }
+    const char *args[] = { "cbuild", flag };
+    assert(cbuild_run(ctx, 2, (char **)args) == 0);
+    assert(strstr(listing.text, "Available targets:\n") == listing.text);
+    for (int i = 0; i < target_count; ++i) {
+        char name[64], expected[256];
+        snprintf(name, sizeof(name), "listing_target_%04d", i);
+        if (i % 2) {
+            snprintf(expected, sizeof(expected), "  %-20s  [file_dep]  -> build/generated_%04d.h\n", name, i);
+        } else {
+            snprintf(expected, sizeof(expected), "  %-20s  [dummy]\n", name);
+        }
+        assert(strstr(listing.text, expected) != NULL);
+    }
+    cbuild_context_free(ctx);
+}
+
 int main(void) {
+    test_target_listing("--list", 0);
+    test_target_listing("-l", 0);
+    test_target_listing("--list", 512);
+    test_target_listing("-l", 512);
     assert(strcmp(CBUILD_VERSION, "v0.1.2") == 0);
     assert(CBUILD_VERSION_MAJOR == 0);
     assert(CBUILD_VERSION_MINOR == 1);
