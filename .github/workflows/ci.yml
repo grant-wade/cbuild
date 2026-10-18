@@ -54,6 +54,21 @@ jobs:
           chmod +x tests/run-posix.sh
           tests/run-posix.sh
 
+  freebsd:
+    name: FreeBSD 15.1 Clang
+    runs-on: [self-hosted, freebsd, amd64]
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run cross-platform integration suite
+        env:
+          CC: clang
+          CXX: clang++
+        run: sh tests/run-posix.sh
+
   sanitizers:
     name: Linux ASan and UBSan
     runs-on: ubuntu-latest
@@ -95,6 +110,7 @@ jobs:
     needs:
       - amalgamation
       - unix
+      - freebsd
       - sanitizers
       - windows
     runs-on: ubuntu-latest

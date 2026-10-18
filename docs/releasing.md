@@ -2,7 +2,7 @@
 
 CBuild releases are automatic and version-driven. After a successful push to `main`, the workflow checks whether a GitHub Release matching `CBUILD_VERSION` already exists. It publishes only unreleased header versions. Ordinary code and documentation changes do not create another release once the current version has been published.
 
-A release is published only after the amalgamation check and the Linux GCC, Linux Clang, macOS Clang, Linux sanitizer, and Windows MSVC jobs all pass.
+A release is published only after the amalgamation check and the Linux GCC, Linux Clang, macOS Clang, FreeBSD 15.1 Clang, Linux sanitizer, and Windows MSVC jobs all pass.
 
 ## Version sources
 
