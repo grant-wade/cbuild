@@ -254,10 +254,15 @@ CBUILD_INTERNAL void cbuild_init(cbuild_context_t* ctx) {
         SYSTEM_INFO sysinfo;
         GetSystemInfo(&sysinfo);
         n = sysinfo.dwNumberOfProcessors;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
         int logical_cpus = 0;
         size_t logical_cpus_size = sizeof(logical_cpus);
-        if (sysctlbyname("hw.logicalcpu", &logical_cpus, &logical_cpus_size,
+#ifdef __APPLE__
+        const char* cpu_key = "hw.logicalcpu";
+#else
+        const char* cpu_key = "hw.ncpu";
+#endif
+        if (sysctlbyname(cpu_key, &logical_cpus, &logical_cpus_size,
                          NULL, 0) == 0 && logical_cpus > 0) {
             n = logical_cpus;
         }

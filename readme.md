@@ -43,6 +43,8 @@ cc -o cbuild build.c
 ./cbuild
 ```
 
+On FreeBSD, the base system's Clang `cc` works with the command above and links pthreads automatically. With other POSIX compilers that require explicit thread linkage, use `cc -pthread -o cbuild build.c`. Self-rebuilds pass `-pthread` on POSIX systems.
+
 On Windows, from a Developer Command Prompt:
 
 ```bat
@@ -55,7 +57,7 @@ You only compile it by hand once. `CBUILD_SELF_REBUILD` notices when `build.c` (
 ## What you get
 
 - **Incremental, parallel builds.** Only what changed gets rebuilt, based on timestamps, header dependencies, and the exact compile and link commands, so changing a flag rebuilds what it should. Compiles run across all your cores, or as many as you pass to `-j`.
-- **GCC, Clang, and MSVC** on Linux, macOS, and Windows, with output names that follow each platform (`libfoo.a` vs `foo.lib`, `.so` vs `.dylib` vs `.dll`).
+- **GCC, Clang, and MSVC** on Linux, macOS, FreeBSD, and Windows, with output names that follow each platform (`libfoo.a` vs `foo.lib`, `.so` vs `.dylib` vs `.dll`).
 - **Executables, static and shared libraries**, plus generated files and custom commands that slot into the same dependency graph.
 - **Tests** that run in parallel, with labels, skip codes, timeouts, and logs, after building exactly what they need.
 - **Build configurations** for Debug, Release, WebAssembly, or your own, written once instead of per compiler.

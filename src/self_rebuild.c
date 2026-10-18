@@ -68,7 +68,7 @@ int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, 
                  exe_path, build_src);
 #else
         snprintf(cmd, sizeof(cmd),
-                 "cc -o \"%s\" \"%s\" -I. -Iinclude",
+                 "cc -pthread -o \"%s\" \"%s\" -I. -Iinclude",
                  exe_path, build_src);
 #endif
         int rc = system(cmd);

@@ -26,7 +26,7 @@ The test suite is intentionally toolchain-free beyond a C/C++ compiler, Python 3
 
 ## Local use
 
-Linux or macOS:
+Linux, macOS, or FreeBSD:
 
 ```sh
 CC=cc CXX=c++ tests/run-posix.sh

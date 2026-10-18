@@ -44,6 +44,13 @@
 #include <limits.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#ifdef __FreeBSD__
+#include <sys/sysctl.h>
+#ifdef __clang__
+/* Keep the single-command bootstrap usable with FreeBSD's base compiler. */
+#pragma comment(lib, "pthread")
+#endif
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>  // _NSGetExecutablePath
 /* Avoid <sys/sysctl.h>: strict POSIX feature modes hide BSD u_int types
