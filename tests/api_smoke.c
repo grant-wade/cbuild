@@ -75,7 +75,222 @@ static void test_target_listing(const char *flag, int target_count) {
     cbuild_context_free(ctx);
 }
 
-int main(void) {
+static void capture_log(void *user_data, cbuild_log_level_t level,
+                        const char *message) {
+    listing_t *log = (listing_t *)user_data;
+    size_t length = strlen(message);
+    (void)level;
+    assert(log->length + length + 2 <= sizeof(log->text));
+    memcpy(log->text + log->length, message, length);
+    log->length += length;
+    log->text[log->length++] = '\n';
+    log->text[log->length] = '\0';
+}
+
+static void clear_log(listing_t *log) {
+    log->length = 0;
+    log->text[0] = '\0';
+}
+
+static void bump_counter(void *user_data) {
+    (*(int *)user_data)++;
+}
+
+/* Exits with args[0] after printing args[1] to stdout and args[2] to stderr when present. */
+static int run_child(int argc, char **args) {
+    if (argc > 1) printf("%s\n", args[1]);
+    if (argc > 2) fprintf(stderr, "%s\n", args[2]);
+    return atoi(args[0]);
+}
+
+static void test_flag_values(void) {
+    const char *repeated[] = { "cbuild", "--mode=first", "--mode", "last" };
+    assert(strcmp(cbuild_get_flag_value(4, (char **)repeated, "mode", 0), "last") == 0);
+
+    const char *mixed[] = { "cbuild", "-j2", "--jobs=3" };
+    assert(strcmp(cbuild_get_flag_value(3, (char **)mixed, "jobs", 'j'), "3") == 0);
+    assert(strcmp(cbuild_get_flag_value(2, (char **)mixed, "jobs", 'j'), "2") == 0);
+    assert(cbuild_get_flag_value(3, (char **)mixed, NULL, 'x') == NULL);
+    assert(strcmp(cbuild_get_flag_value(3, (char **)mixed, NULL, 'j'), "2") == 0);
+
+    const char *prefixes[] = { "cbuild", "--mode-extra=x", "--modes", "y" };
+    assert(cbuild_get_flag_value(4, (char **)prefixes, "mode", 0) == NULL);
+
+    const char *dangling[] = { "cbuild", "--mode=kept", "--mode" };
+    assert(strcmp(cbuild_get_flag_value(3, (char **)dangling, "mode", 0), "kept") == 0);
+    assert(cbuild_get_flag_value(2, (char **)dangling + 1, "mode", 0) == NULL);
+
+    const char *empty[] = { "cbuild", "--mode=" };
+    assert(strcmp(cbuild_get_flag_value(2, (char **)empty, "mode", 0), "") == 0);
+
+    const char *program_name[] = { "--mode=program" };
+    assert(cbuild_get_flag_value(1, (char **)program_name, "mode", 0) == NULL);
+}
+
+static void test_test_registration(void) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    assert(ctx != NULL);
+    listing_t log = { { 0 }, 0 };
+    cbuild_set_logger(ctx, capture_log, &log);
+    cbuild_set_output_dir(ctx, "tests/api-build");
+
+    const char *args[] = { "program" };
+    assert(cbuild_add_test(NULL, "name", NULL, args, 1) == NULL);
+    assert(cbuild_add_test(ctx, NULL, NULL, args, 1) == NULL);
+    assert(cbuild_get_last_error(ctx) != NULL);
+    assert(cbuild_add_test(ctx, "", NULL, args, 1) == NULL);
+    assert(cbuild_add_test(ctx, "negative", NULL, args, -1) == NULL);
+    assert(cbuild_add_test(ctx, "missing args", NULL, NULL, 1) == NULL);
+
+    target_t *phony = cbuild_dummy_target(ctx, "phony");
+    assert(phony != NULL);
+    assert(cbuild_add_test(ctx, "not runnable", phony, NULL, 0) == NULL);
+    assert(strstr(cbuild_get_last_error(ctx), "not runnable") != NULL);
+
+    cbuild_test_add_dependency(ctx, NULL, phony);
+    cbuild_test_add_label(ctx, NULL, "label");
+    cbuild_test_set_skip_code(ctx, NULL, 1);
+    cbuild_test_set_timeout(ctx, NULL, 1);
+    cbuild_test_set_lock(ctx, NULL, "lock");
+
+    test_t *test = cbuild_add_test(ctx, "registered", NULL, args, 1);
+    assert(test != NULL);
+    cbuild_test_add_dependency(ctx, test, NULL);
+    cbuild_test_add_label(ctx, test, NULL);
+    cbuild_test_add_label(ctx, test, "");
+
+    const char *list_args[] = { "cbuild", "--list-tests" };
+    assert(cbuild_run(ctx, 2, (char **)list_args) == 0);
+    assert(strstr(log.text, "Available tests:\n  registered\n") != NULL);
+
+    cbuild_context_free(ctx);
+}
+
+static void test_spawn(const char *self) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    assert(ctx != NULL);
+    char *output = NULL;
+
+    const char *both[] = { self, "--child", "4", "spawn out", "spawn err" };
+    assert(cbuild_spawn(ctx, both, 5, &output) == 4);
+    assert(output != NULL);
+    assert(strstr(output, "spawn out") != NULL);
+    assert(strstr(output, "spawn err") != NULL);
+    free(output);
+
+    const char *silent[] = { self, "--child", "5" };
+    output = (char *)both;
+    assert(cbuild_spawn(ctx, silent, 3, &output) == 5);
+    assert(output == NULL);
+    assert(cbuild_spawn(ctx, silent, 3, NULL) == 5);
+
+    const char *missing[] = { "no-such-program-for-cbuild-tests" };
+    int rc = cbuild_spawn(ctx, missing, 1, &output);
+    assert(rc == -1 || rc == 127);
+    free(output);
+
+    const char *null_program[] = { NULL };
+    output = (char *)both;
+    assert(cbuild_spawn(ctx, null_program, 1, &output) == -1);
+    assert(output == NULL);
+    assert(cbuild_spawn(NULL, silent, 3, NULL) == -1);
+    assert(cbuild_spawn(ctx, NULL, 3, NULL) == -1);
+    assert(cbuild_spawn(ctx, silent, 0, NULL) == -1);
+
+    cbuild_context_free(ctx);
+}
+
+static void test_run_tests(const char *self) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    assert(ctx != NULL);
+    listing_t log = { { 0 }, 0 };
+    cbuild_set_logger(ctx, capture_log, &log);
+    cbuild_set_output_dir(ctx, "tests/api-build");
+    cbuild_set_parallelism(ctx, 2);
+
+    assert(cbuild_run_tests(NULL, NULL, NULL) == -1);
+
+    const char *pass_args[] = { self, "--child", "0" };
+    const char *skip_args[] = { self, "--child", "9" };
+    const char *fail_args[] = { self, "--child", "3" };
+    test_t *pass = cbuild_add_test(ctx, "run_pass", NULL, pass_args, 3);
+    test_t *skip = cbuild_add_test(ctx, "run_skip", NULL, skip_args, 3);
+    test_t *fail = cbuild_add_test(ctx, "run_fail", NULL, fail_args, 3);
+    cbuild_test_add_label(ctx, pass, "good");
+    cbuild_test_add_label(ctx, skip, "good");
+    cbuild_test_add_label(ctx, fail, "bad");
+    cbuild_test_set_skip_code(ctx, skip, 9);
+
+    int built = 0;
+    target_t *needed = cbuild_dummy_target(ctx, "needed");
+    assert(needed != NULL);
+    cbuild_target_add_command(ctx, needed, cbuild_command_function(ctx, "bump", bump_counter, &built));
+    test_t *with_target = cbuild_add_test(ctx, "run_with_target", needed, pass_args, 3);
+    cbuild_test_add_label(ctx, with_target, "needs_target");
+
+    char *failing_argv[] = { (char *)self, (char *)"--child", (char *)"1" };
+    target_t *unbuildable = cbuild_dummy_target(ctx, "unbuildable");
+    assert(unbuildable != NULL);
+    cbuild_target_add_command(ctx, unbuildable, cbuild_command_argv(ctx, "fail", failing_argv, 3));
+    test_t *blocked = cbuild_add_test(ctx, "run_blocked", unbuildable, pass_args, 3);
+    cbuild_test_add_label(ctx, blocked, "blocked");
+
+    assert(cbuild_run_tests(ctx, "good", NULL) == 0);
+    assert(strstr(log.text, "Tests: 1 passed, 0 failed, 1 skipped") != NULL);
+    assert(built == 0);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "bad", NULL) == -1);
+    assert(strstr(log.text, "Tests: 0 passed, 1 failed, 0 skipped") != NULL);
+    assert(cbuild_file_exists("tests/api-build/tests/run_fail.log"));
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, NULL, "run_pa*") == 0);
+    assert(strstr(log.text, "Tests: 1 passed, 0 failed, 0 skipped") != NULL);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "good", "run_skip") == 0);
+    assert(strstr(log.text, "Tests: 0 passed, 0 failed, 1 skipped") != NULL);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "needs_target", NULL) == 0);
+    assert(strstr(log.text, "Tests: 1 passed, 0 failed, 0 skipped") != NULL);
+    assert(built == 1);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "blocked", NULL) == -1);
+    assert(strstr(log.text, "Build failed; tests not run.") != NULL);
+    assert(strstr(log.text, "run_blocked") == NULL);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "no-such-label", NULL) == 0);
+    assert(strstr(log.text, "no tests selected") != NULL);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "", "run_*_target") == 0);
+    assert(strstr(log.text, "Tests: 1 passed, 0 failed, 0 skipped") != NULL);
+
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, "bad", "run_pass") == 0);
+    assert(strstr(log.text, "no tests selected") != NULL);
+
+    cbuild_reset(ctx);
+    cbuild_set_logger(ctx, capture_log, &log);
+    clear_log(&log);
+    assert(cbuild_run_tests(ctx, NULL, NULL) == 0);
+    assert(strstr(log.text, "no tests selected") != NULL);
+
+    cbuild_context_free(ctx);
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 3 && strcmp(argv[1], "--child") == 0) return run_child(argc - 2, argv + 2);
+
+    test_flag_values();
+    test_test_registration();
+    test_spawn(argv[0]);
+    test_run_tests(argv[0]);
+
     test_target_listing("--list", 0);
     test_target_listing("-l", 0);
     test_target_listing("--list", 512);

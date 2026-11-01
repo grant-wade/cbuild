@@ -14,6 +14,7 @@ compile_commands.json
 /tests/api_smoke
 /tests/api_smoke.exe
 /tests/regress work/
+/tests/runner work/
 .DS_Store
 /tests/api_smoke_split
 /tests/api_smoke_split.exe

@@ -18,7 +18,8 @@ The test suite is intentionally toolchain-free beyond a C/C++ compiler, Python 3
 - Header dependency and compile-signature invalidation
 - `compile_commands.json` generation and JSON parsing
 - Target listing/filtering, graph and reverse-dependency output, manifests, custom flags (in every phase), and subcommands
-- Tests: listing, label and name selection, passing, skipped, failing, and timed-out tests, logs, and `cbuild_spawn`
+- `cbuild_spawn` output capture, exit status, and argument validation; `cbuild_get_flag_value` parsing; `cbuild_add_test` validation; `cbuild_run_tests` selection and return values
+- Test framework (`tests/runner`, all platforms): listing and selection, pass, skip, and failure reporting, exit status, log contents and locations, standard input, environment, argument passing, timeouts, parallelism, locks, build dependencies, build failures, and flag phases
 - Self-rebuilding build programs
 - Rebuild-correctness regressions (`tests/regress`, all platforms): paths containing spaces, edits made within a second of the previous build, removed headers, failed compilation, changed flags, deleted intermediate outputs, repeated no-op builds, explicit output paths, generator dependencies, and command dependency cycles
 - `--clean` safety: symbolic links and Windows junctions, files outside the build outputs, and output directories that contain the project
@@ -32,7 +33,7 @@ Linux, macOS, or FreeBSD:
 CC=cc CXX=c++ tests/run-posix.sh
 ```
 
-Both platform scripts run `tests/run-regress.py`, which can also be run on its own (`python3 tests/run-regress.py`, honouring `CC` and, on Unix, `CFLAGS`). It works on a scratch copy of `tests/regress` because its scenarios edit and delete sources.
+Both platform scripts run `tests/run-regress.py` and `tests/run-test-runner.py`, which can also be run on their own (for example `python3 tests/run-regress.py`, honouring `CC` and, on Unix, `CFLAGS`). They work on scratch copies of `tests/regress` and `tests/runner`.
 
 To use another compiler:
 

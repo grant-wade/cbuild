@@ -175,6 +175,8 @@ test ! -e build/test_app
 # Rebuild-correctness and clean-safety regressions run on their own scratch copy.
 python3 "$ROOT/tests/run-regress.py"
 
+python3 "$ROOT/tests/run-test-runner.py"
+
 # Keep the repository's subproject example healthy too.
 cd "$ROOT/example"
 # shellcheck disable=SC2086

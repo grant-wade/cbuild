@@ -9,6 +9,7 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - Tests: `cbuild_add_test` registers a test program with labels, a skip exit code, a timeout, a lock shared with tests that must not overlap, and extra targets to build first. `./cbuild --test` builds what the selected tests need and runs them in parallel, printing the output of failures and keeping every log in `<output dir>/tests/`. Select with `--test-label`, `--test-filter`, and `--test-exclude`; list with `--list-tests`; set a default limit with `--test-timeout`. `cbuild_run_tests` does the same without the CLI.
 - `cbuild_spawn` runs a program without a shell, optionally capturing its output, for use in callbacks and build programs.
 - `cbuild_get_flag_value` reads a flag's value from argv before the graph is defined, like `cbuild_has_flag` for flags that take values.
+- `tests/run-test-runner.py` tests the test framework on every platform.
 
 ### Fixed
 

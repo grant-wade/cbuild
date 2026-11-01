@@ -211,6 +211,9 @@ try {
     & python tests\run-regress.py
     Assert-LastExitCode "Regression suite"
 
+    & python tests\run-test-runner.py
+    Assert-LastExitCode "Test framework suite"
+
     Set-Location "$Root\example"
     & $CC /nologo /std:c11 /W4 /D_CRT_SECURE_NO_WARNINGS `
         build.c /Fe:cbuild.exe
