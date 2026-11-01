@@ -9,10 +9,10 @@ A release is published only after the amalgamation check and the Linux GCC, Linu
 The canonical public version is declared in `src/cbuild.h` and carried into the generated `cbuild.h`, which is what the workflow reads:
 
 ```c
-#define CBUILD_VERSION "v0.1.2"
+#define CBUILD_VERSION "v0.2.0"
 #define CBUILD_VERSION_MAJOR 0
-#define CBUILD_VERSION_MINOR 1
-#define CBUILD_VERSION_PATCH 2
+#define CBUILD_VERSION_MINOR 2
+#define CBUILD_VERSION_PATCH 0
 ```
 
 The workflow requires semantic version format with a leading `v`, and verifies that the numeric macros agree with `CBUILD_VERSION`.
