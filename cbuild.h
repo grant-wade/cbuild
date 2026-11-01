@@ -184,10 +184,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define CBUILD_H
 
 /* Public semantic version. Keep this in sync with release tags. */
-#define CBUILD_VERSION "v0.1.2"
+#define CBUILD_VERSION "v0.2.0"
 #define CBUILD_VERSION_MAJOR 0
-#define CBUILD_VERSION_MINOR 1
-#define CBUILD_VERSION_PATCH 2
+#define CBUILD_VERSION_MINOR 2
+#define CBUILD_VERSION_PATCH 0
 
 #ifdef __cplusplus
 extern "C" {
