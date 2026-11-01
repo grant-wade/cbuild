@@ -108,6 +108,7 @@
     X(project, flags_can_change_defines_before_the_build)            \
     X(project, run_flag_runs_a_subcommand)                           \
     X(project, bare_name_runs_a_subcommand)                          \
+    X(project, failing_subcommand_fails_the_run)                     \
     X(project, generated_file_input_regenerates)                     \
     X(project, build_program_rebuilds_itself)                        \
     X(project, rebuilt_program_reports_its_result_to_the_caller)     \
@@ -132,6 +133,29 @@
     X(example, clean_is_nested)                                      \
     X(example, run_subcommand_prints_its_output)                     \
     X(example, registered_tests_pass)                                \
-    X(example, slow_tests_run_on_request)
+    X(example, slow_tests_run_on_request)                            \
+                                                                     \
+    X(launcher, first_run_compiles_the_build_program)                \
+    X(launcher, project_is_found_from_a_subdirectory)                \
+    X(launcher, files_without_the_implementation_are_skipped)        \
+    X(launcher, the_nearest_build_program_wins)                      \
+    X(launcher, arguments_and_exit_status_pass_through)              \
+    X(launcher, build_program_still_rebuilds_itself)                 \
+    X(launcher, staleness_is_left_to_the_build_program)              \
+    X(launcher, compiler_choice_matches_self_rebuild)                \
+    X(launcher, failed_compile_stops_the_run)                        \
+    X(launcher, a_directory_in_the_way_is_reported)                  \
+    X(launcher, unstartable_program_is_reported)                     \
+    X(launcher, outside_a_project_it_answers_for_itself)             \
+    X(launcher, own_flags_skip_the_project)                          \
+    X(launcher, install_copies_a_working_launcher)                   \
+    X(launcher, install_replaces_an_existing_copy)                   \
+    X(launcher, install_reports_whether_path_has_it)                 \
+    X(launcher, install_needs_a_home_directory)                      \
+    X(launcher, install_appends_to_the_user_path_once)               \
+    X(launcher, install_keeps_a_plain_string_user_path)              \
+    X(launcher, install_creates_a_missing_user_path)                 \
+    X(launcher, install_recognizes_an_unexpanded_entry)              \
+    X(launcher, install_leaves_an_unusable_user_path_alone)
 
 #endif

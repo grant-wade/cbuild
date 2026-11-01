@@ -468,7 +468,10 @@ CBUILD_INTERNAL int run_command(cbuild_context_t* ctx, const char* cmd, int capt
         return ret;
 #else
         int ret = system(cmd);
-        return ret;
+        if (ret == -1) return -1;
+        if (WIFEXITED(ret)) return WEXITSTATUS(ret);
+        if (WIFSIGNALED(ret)) return 128 + WTERMSIG(ret);
+        return -1;
 #endif
     }
 }

@@ -17,6 +17,7 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - `COMPILE` steps show `[n/total]` for each target.
 - `PASS`, `FAIL`, and `SKIP` are green, red, and yellow, and step labels use their own colors.
 - Color is used only on terminals, including Windows consoles that support it, and follows `NO_COLOR` and `CLICOLOR_FORCE`.
+- A `cbuild` launcher, installed to `~/.local/bin` (`~/bin` on FreeBSD) by `./cbuild install`, runs the build program of the project around the working directory and compiles it when it is missing. On Windows, the install adds its directory to the user `PATH`.
 
 ### Fixed
 
@@ -28,6 +29,7 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - Compiler arguments and names containing `cl` were mistaken for MSVC, and `clang-cl` was not recognized as MSVC-style.
 - MSVC-style compilers always linked with `cl` instead of the configured compiler.
 - Test timeouts left processes started by the test running.
+- A subcommand whose command line failed exited 0 on POSIX systems.
 - Stopping `--test` with a signal left running tests behind on POSIX.
 - Subproject manifests ignore output lines that are not targets.
 - `--manifest` and `--list` printed `(null)/...` paths when the output directory was left at its default, and outdated paths when it was set after the target was created.

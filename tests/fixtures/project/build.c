@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
                          "Build test_app with FEATURE_VALUE=1",
                          enable_feature, &feature_binding);
     cbuild_register_subcommand(ctx, "app", app, TEST_RUN_COMMAND, NULL, NULL);
+    cbuild_register_subcommand(ctx, "app-fails", app, TEST_RUN_COMMAND " --exit 4", NULL, NULL);
     cbuild_register_flag(ctx, "spawn-check", 0, 0, CBUILD_FLAG_AFTER_BUILD,
                          "Run the built app through cbuild_spawn", spawn_check, ctx);
 

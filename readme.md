@@ -85,6 +85,27 @@ You only compile it by hand once. `CBUILD_SELF_REBUILD` notices when `build.c` (
 
 The only bare word CBuild accepts is the name of a subcommand you registered. Everything built in is an option: it's `./cbuild --clean`, not `./cbuild clean`.
 
+## The launcher
+
+The `cbuild` launcher runs a project's build program from anywhere inside the project. Install it from a clone of this repository:
+
+```sh
+cc -std=c11 build.c -o cbuild
+./cbuild install              # copies the launcher to ~/.local/bin/cbuild, or ~/bin/cbuild on FreeBSD
+```
+
+```sh
+cbuild --test                 # same as ./cbuild --test at the project root
+```
+
+The launcher goes up from the working directory to the nearest `build.c` containing `CBUILD_IMPLEMENTATION`, enters that directory, compiles `./cbuild` if it is missing, and runs it with your arguments. Relative paths in those arguments resolve from the project root.
+
+The first compile uses the same compiler and flags as a self-rebuild. After that, the launcher never recompiles: rebuilds come from `CBUILD_SELF_REBUILD`. The project provides its own `cbuild.h`.
+
+On Windows, the install adds `%USERPROFILE%\.local\bin` to your user `PATH` when it is missing, and new terminals pick it up.
+
+Outside a project, `cbuild --help` and `cbuild --version` describe the launcher. `--launcher-help`, `--launcher-version`, and `--launcher-install` always go to the launcher.
+
 ## A quick tour
 
 ### Targets

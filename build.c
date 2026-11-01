@@ -10,9 +10,11 @@
 #ifdef _WIN32
 #define AMALGAMATE_PROGRAM "build/amalgamate.exe"
 #define AMALGAMATE_COMMAND ".\\build\\amalgamate.exe"
+#define INSTALL_COMMAND ".\\build\\launcher.exe --launcher-install"
 #else
 #define AMALGAMATE_PROGRAM "build/amalgamate"
 #define AMALGAMATE_COMMAND "./build/amalgamate"
+#define INSTALL_COMMAND "./build/launcher --launcher-install"
 #endif
 
 #define COUNT_OF(array) ((int)(sizeof(array) / sizeof((array)[0])))
@@ -22,9 +24,9 @@ enum { SCENARIO_TIMEOUT_SECONDS = 120, SCENARIO_SKIP_EXIT = 77 };
 static const char *const suite_sources[] = {
     "tests/suite/api.c",     "tests/suite/example.c", "tests/suite/fake_compiler.c",
     "tests/suite/harness.c",
-    "tests/suite/header.c",  "tests/suite/json.c",    "tests/suite/main.c",
-    "tests/suite/project.c", "tests/suite/regress.c", "tests/suite/runner.c",
-    "tests/suite/subproject.c",
+    "tests/suite/header.c",  "tests/suite/json.c",    "tests/suite/launcher.c",
+    "tests/suite/main.c",    "tests/suite/project.c", "tests/suite/regress.c",
+    "tests/suite/runner.c",  "tests/suite/subproject.c",
 };
 
 /* The targets scenarios run from or depend on. */
@@ -33,6 +35,7 @@ typedef struct {
     target_t *suite_split;
     target_t *regress;
     target_t *runner;
+    target_t *launcher;
 } suite_targets_t;
 
 static target_t *add_suite(cbuild_context_t *ctx, const char *name) {
@@ -64,6 +67,7 @@ static void add_scenario(cbuild_context_t *ctx, const suite_targets_t *targets, 
     test_t *test = add_scenario_test(ctx, scenario, targets->suite, scenario, group);
     if (strcmp(group, "regress") == 0) cbuild_test_add_dependency(ctx, test, targets->regress);
     if (strcmp(group, "runner") == 0) cbuild_test_add_dependency(ctx, test, targets->runner);
+    if (strcmp(group, "launcher") == 0) cbuild_test_add_dependency(ctx, test, targets->launcher);
     if (strcmp(group, "api") == 0) {
         char split_name[128];
         snprintf(split_name, sizeof(split_name), "split.%s", name);
@@ -104,7 +108,11 @@ int main(int argc, char **argv) {
     cbuild_add_link_target(ctx, check_header, amalgamate);
     cbuild_target_add_post_command(ctx, check_header, cbuild_command_argv(ctx, "check cbuild.h", check_argv, 2));
 
+    target_t *launcher = add_fixture_program(ctx, "launcher", "tools/launcher.c");
+    cbuild_register_subcommand(ctx, "install", launcher, INSTALL_COMMAND, NULL, NULL);
+
     suite_targets_t targets;
+    targets.launcher = launcher;
     targets.suite = add_suite(ctx, "suite");
     cbuild_add_link_target(ctx, targets.suite, check_header);
     cbuild_add_source(ctx, targets.suite, "tests/suite/implementation.c");

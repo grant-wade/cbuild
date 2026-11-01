@@ -5711,7 +5711,10 @@ CBUILD_INTERNAL int run_command(cbuild_context_t* ctx, const char* cmd, int capt
         return ret;
 #else
         int ret = system(cmd);
-        return ret;
+        if (ret == -1) return -1;
+        if (WIFEXITED(ret)) return WEXITSTATUS(ret);
+        if (WIFSIGNALED(ret)) return 128 + WTERMSIG(ret);
+        return -1;
 #endif
     }
 }
@@ -5845,23 +5848,27 @@ static char* cbuild__self_rebuild_command(const char* compiler, const char* exe_
     return cmd;
 }
 
+/* Writes the path of the running program to out, or argv0 when the system cannot report it. */
+static void cbuild__self_path(char* out, size_t size, const char* argv0) {
+#ifdef _WIN32
+    (void)argv0;
+    GetModuleFileNameA(NULL, out, (DWORD)size);
+#elif defined(__APPLE__)
+    uint32_t sz = (uint32_t)size;
+    if (_NSGetExecutablePath(out, &sz) != 0) snprintf(out, size, "%s", argv0);
+#else
+    ssize_t len = readlink("/proc/self/exe", out, size - 1);
+    if (len > 0)
+        out[len] = 0;
+    else
+        snprintf(out, size, "%s", argv0);
+#endif
+}
+
 int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, const char** sources,
                                   int sources_count) {
     char exe_path[512];
-#ifdef _WIN32
-    GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
-#elif defined(__APPLE__)
-    uint32_t sz = sizeof(exe_path);
-    if (_NSGetExecutablePath(exe_path, &sz) != 0) {
-        strncpy(exe_path, argv[0], sizeof(exe_path));
-    }
-#else
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len > 0)
-        exe_path[len] = 0;
-    else
-        strncpy(exe_path, argv[0], sizeof(exe_path));
-#endif
+    cbuild__self_path(exe_path, sizeof(exe_path), argv[0]);
 
     // Always remove any lingering .old file
     char old_path[520];

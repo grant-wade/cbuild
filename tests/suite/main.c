@@ -11,6 +11,7 @@ void runner_setup(void);
 void project_setup(void);
 void subproject_setup(void);
 void example_setup(void);
+void launcher_setup(void);
 
 typedef struct {
     const char *name;

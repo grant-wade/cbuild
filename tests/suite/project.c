@@ -127,6 +127,14 @@ SCENARIO(project, bare_name_runs_a_subcommand) {
     EXPECT_HAS(BUILD("--feature", "app"), "feature=1");
 }
 
+SCENARIO(project, failing_subcommand_fails_the_run) {
+    outcome_t outcome = CBUILD("app-fails");
+    CHECK(outcome.status != 0, "the failing subcommand exited with status 0");
+#ifndef _WIN32
+    CHECK(outcome.status == 4, "the exit status was %d", outcome.status);
+#endif
+}
+
 SCENARIO(project, generated_file_input_regenerates) {
     BUILD("--target=test_app");
     settle();
