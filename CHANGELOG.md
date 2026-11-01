@@ -24,6 +24,7 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - `cbuild_remove_dir` deleted the contents of symlinked directories.
 - Self-rebuilds ignored `CC`; they now use `CC_FOR_BUILD`, then `CC`, then `cc` or `cl`.
 - A failed self-rebuild left no build program.
+- On Windows, a self-rebuild lost the exit status of the rebuilt program and split arguments containing spaces.
 - Compiler arguments and names containing `cl` were mistaken for MSVC, and `clang-cl` was not recognized as MSVC-style.
 - MSVC-style compilers always linked with `cl` instead of the configured compiler.
 - Test timeouts left processes started by the test running.

@@ -110,6 +110,7 @@
     X(project, bare_name_runs_a_subcommand)                          \
     X(project, generated_file_input_regenerates)                     \
     X(project, build_program_rebuilds_itself)                        \
+    X(project, rebuilt_program_reports_its_result_to_the_caller)     \
     X(project, rebuild_defaults_without_compiler_settings)           \
     X(project, rebuild_prefers_cc_for_build_to_cc)                   \
     X(project, rebuilt_program_comes_from_the_chosen_compiler)       \

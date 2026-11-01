@@ -5795,11 +5795,20 @@ static int cbuild__needs_rebuild(const char* exe_path, const char** sources,
     return 0;
 }
 
-/* Returns only when the program could not be started. */
-static void cbuild__exec_new_build(const char* exe_path, char** argv) {
+/* Replaces this run with the program at exe_path. Returns only when it could not be started. */
+static void cbuild__exec_new_build(cbuild_context_t* ctx, const char* exe_path, int argc, char** argv) {
 #ifdef _WIN32
-    _spawnv(_P_OVERLAY, exe_path, argv);
+    const char** args = (const char**)malloc(sizeof(char*) * (size_t)argc);
+    if (!args) return;
+    args[0] = exe_path;
+    for (int i = 1; i < argc; ++i) args[i] = argv[i];
+    fflush(NULL);
+    int status = cbuild_spawn(ctx, args, argc, NULL);
+    free(args);
+    if (status != -1) exit(status);
 #else
+    (void)ctx;
+    (void)argc;
     execv(exe_path, argv);
 #endif
 }
@@ -5838,7 +5847,6 @@ static char* cbuild__self_rebuild_command(const char* compiler, const char* exe_
 
 int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, const char** sources,
                                   int sources_count) {
-    (void)argc;
     char exe_path[512];
 #ifdef _WIN32
     GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
@@ -5874,7 +5882,7 @@ int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, 
         char* cmd = cbuild__self_rebuild_command(compiler, exe_path, build_src);
         int rc = cmd ? system(cmd) : -1;
         free(cmd);
-        if (rc == 0) cbuild__exec_new_build(exe_path, argv);
+        if (rc == 0) cbuild__exec_new_build(ctx, exe_path, argc, argv);
         if (moved) {
             remove(exe_path);
             if (rename(old_path, exe_path) != 0) {

@@ -154,6 +154,19 @@ static void mark_build_program_stale(void) {
     touch_file("build.c");
 }
 
+SCENARIO(project, rebuilt_program_reports_its_result_to_the_caller) {
+    mark_build_program_stale();
+    const char *log = BUILD_FAILS("--target=name with spaces");
+    EXPECT_HAS(log, "Detected changes");
+    EXPECT_HAS(log, "'name with spaces' not found");
+    EXPECT_FILE("cbuild" EXE);
+
+    mark_build_program_stale();
+    log = BUILD("--target=math");
+    EXPECT_HAS(log, "Detected changes");
+    EXPECT_FILE(STATIC_LIBRARY);
+}
+
 SCENARIO(project, rebuild_defaults_without_compiler_settings) {
     mark_build_program_stale();
     unset_env("CC");

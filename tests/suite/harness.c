@@ -297,12 +297,28 @@ const char *with_inherited(const char *name, const char *flags) {
     return inherited && *inherited ? format_text("%s %s", inherited, flags) : flags;
 }
 
+#ifdef _WIN32
+static HANDLE original_stdin;
+static HANDLE fed_stdin;
+#endif
+
+static void release_fed_stdin(void) {
+#ifdef _WIN32
+    if (!fed_stdin) return;
+    SetStdHandle(STD_INPUT_HANDLE, original_stdin);
+    CloseHandle(fed_stdin);
+    fed_stdin = NULL;
+#endif
+}
+
 void feed_stdin(const char *text) {
+    release_fed_stdin();
     write_text("stdin.txt", text);
 #ifdef _WIN32
     SECURITY_ATTRIBUTES attributes = { sizeof(attributes), NULL, TRUE };
-    HANDLE input = CreateFileA("stdin.txt", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &attributes, OPEN_EXISTING, 0, NULL);
-    if (input == INVALID_HANDLE_VALUE || !SetStdHandle(STD_INPUT_HANDLE, input)) h_fail("could not replace stdin");
+    original_stdin = GetStdHandle(STD_INPUT_HANDLE);
+    fed_stdin = CreateFileA("stdin.txt", GENERIC_READ, FILE_SHARE_READ, &attributes, OPEN_EXISTING, 0, NULL);
+    if (fed_stdin == INVALID_HANDLE_VALUE || !SetStdHandle(STD_INPUT_HANDLE, fed_stdin)) h_fail("could not replace stdin");
 #else
     if (!freopen("stdin.txt", "r", stdin)) h_fail("could not replace stdin");
 #endif
@@ -416,7 +432,12 @@ void delete_file(const char *path) {
 }
 
 void delete_tree(const char *path) {
-    if (cbuild_remove_dir(path) != 0) h_fail("could not delete the directory %s", path);
+    enum { ATTEMPTS = 50, RETRY_MS = 100 };
+    for (int attempt = 0; attempt < ATTEMPTS; ++attempt) {
+        if (cbuild_remove_dir(path) == 0) return;
+        sleep_ms(RETRY_MS);
+    }
+    h_fail("could not delete the directory %s", path);
 }
 
 void rename_path(const char *from, const char *to) {
@@ -702,6 +723,7 @@ void h_init(const char *self, const char *scratch) {
 }
 
 void h_finish(void) {
+    release_fed_stdin();
     change_dir(repository_root);
     delete_tree(scratch_path);
     cbuild_context_free(spawn_context);
