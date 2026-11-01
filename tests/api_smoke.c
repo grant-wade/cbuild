@@ -1,5 +1,9 @@
 /* By default this exercises the shipped single header. The suite also builds
    it with CBUILD_TEST_SPLIT_SOURCES and links the separately compiled src/ files. */
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #ifdef CBUILD_TEST_SPLIT_SOURCES
 #include "../src/cbuild.h"
 #else
@@ -11,6 +15,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static int callback_count;
 static int log_count;
@@ -304,9 +315,72 @@ static void test_run_tests(const char *self) {
     cbuild_context_free(ctx);
 }
 
+static void make_dir(const char *path) {
+#ifdef _WIN32
+    assert(_mkdir(path) == 0);
+#else
+    assert(mkdir(path, 0777) == 0);
+#endif
+}
+
+static void make_file(const char *path) {
+    FILE *file = fopen(path, "w");
+    assert(file != NULL);
+    fputs("contents\n", file);
+    fclose(file);
+}
+
+/* target is relative to the working directory. */
+static void make_dir_link(const char *link, const char *target) {
+    char cwd[1024], absolute[2048];
+    assert(cbuild_get_cwd(cwd, sizeof(cwd)) == 0);
+    snprintf(absolute, sizeof(absolute), "%s/%s", cwd, target);
+#ifdef _WIN32
+    char command[4096];
+    snprintf(command, sizeof(command), "mklink /J \"%s\" \"%s\" >NUL", link, absolute);
+    for (char *p = command; *p; ++p) {
+        if (*p == '/' && p > command + 8) *p = '\\';
+    }
+    assert(system(command) == 0);
+#else
+    assert(symlink(absolute, link) == 0);
+#endif
+}
+
+static void test_remove_dir(void) {
+    make_dir("tests/api-remove");
+    make_dir("tests/api-remove/precious");
+    make_file("tests/api-remove/precious/keep.txt");
+    make_dir("tests/api-remove/tree");
+    make_dir("tests/api-remove/tree/nested");
+    make_file("tests/api-remove/tree/nested/file.txt");
+    make_dir_link("tests/api-remove/tree/link", "tests/api-remove/precious");
+    make_dir_link("tests/api-remove/tree/nested/deep", "tests/api-remove/precious");
+    make_dir_link("tests/api-remove/top", "tests/api-remove/precious");
+#ifndef _WIN32
+    assert(symlink("no-such-target", "tests/api-remove/tree/dangling") == 0);
+#endif
+
+    assert(cbuild_remove_dir("tests/api-remove/top") == 0);
+    assert(!cbuild_dir_exists("tests/api-remove/top"));
+    assert(cbuild_file_exists("tests/api-remove/precious/keep.txt"));
+
+    assert(cbuild_remove_dir("tests/api-remove/tree") == 0);
+    assert(!cbuild_dir_exists("tests/api-remove/tree"));
+    assert(cbuild_file_exists("tests/api-remove/precious/keep.txt"));
+
+    assert(cbuild_remove_dir("tests/api-remove/no-such-dir") == 0);
+    assert(cbuild_remove_dir(NULL) == -1);
+    assert(cbuild_remove_dir("") == -1);
+
+    assert(cbuild_remove_dir("tests/api-remove") == 0);
+    assert(!cbuild_dir_exists("tests/api-remove"));
+}
+
 int main(int argc, char **argv) {
     if (argc >= 3 && strcmp(argv[1], "--child") == 0) return run_child(argc - 2, argv + 2);
 
+    test_remove_dir();
     test_sections();
     test_flag_values();
     test_test_registration();

@@ -2,7 +2,7 @@
 
 #include "cbuild_internal.h"
 
-static void remove_dir_recursive(cbuild_context_t* ctx, const char* path);
+static int remove_dir_recursive(const char* path);
 
 /* Normalize path separators to forward slashes for consistent hashing/comparison */
 CBUILD_INTERNAL char* cbuild__normalize_path(const char* path) {
@@ -64,43 +64,6 @@ int cbuild_remove_file(const char* path) {
     if (!cbuild_file_exists(path))
         return 0;
     return unlink(path);
-}
-
-int cbuild_remove_dir(const char* path) {
-    if (!path || !*path)
-        return -1;
-    if (!cbuild_dir_exists(path))
-        return 0;
-#ifdef _WIN32
-    char cmd[PATH_MAX + 32];
-    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", path);
-    return system(cmd);
-#else
-    DIR* dir;
-    struct dirent* entry;
-    char full_path[PATH_MAX];
-    if (!(dir = opendir(path)))
-        return -1;
-    while ((entry = readdir(dir))) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-        struct stat st;
-        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            if (cbuild_remove_dir(full_path) != 0) {
-                closedir(dir);
-                return -1;
-            }
-        } else {
-            if (cbuild_remove_file(full_path) != 0) {
-                closedir(dir);
-                return -1;
-            }
-        }
-    }
-    closedir(dir);
-    return rmdir(path);
-#endif
 }
 
 int cbuild_get_cwd(char* buf, long size) {
@@ -452,6 +415,16 @@ static int cbuild__real_dir_kind(const char* path) {
 #endif
 }
 
+static int cbuild__remove_link_or_file(const char* path) {
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributes(path);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) return _rmdir(path);
+    if (remove(path) == 0) return 0;
+    SetFileAttributes(path, FILE_ATTRIBUTE_NORMAL);
+#endif
+    return remove(path);
+}
+
 /* Returns 1 when path is the current working directory or one of its ancestors
  * (which includes the filesystem root), or when that cannot be ruled out. */
 static int cbuild__dir_contains_cwd(const char* path) {
@@ -496,59 +469,66 @@ CBUILD_INTERNAL void cbuild__clean_dir(cbuild_context_t* ctx, const char* path) 
                     "cbuild: not cleaning '%s': it contains the current working directory", path);
         return;
     }
-    remove_dir_recursive(ctx, path);
+    remove_dir_recursive(path);
 }
 
-/* Links are removed, never followed, so nothing outside the tree is touched. */
-static void remove_dir_recursive(cbuild_context_t* ctx, const char* path) {
+int cbuild_remove_dir(const char* path) {
     if (!path || !*path)
-        return;
+        return -1;
+    int kind = cbuild__real_dir_kind(path);
+    if (kind == 0)
+        return 0;
+    return kind < 0 ? cbuild__remove_link_or_file(path) : remove_dir_recursive(path);
+}
+
+/* Returns 0 when the whole tree is gone, -1 otherwise. Links are removed, never followed. */
+static int remove_dir_recursive(const char* path) {
+    if (!path || !*path)
+        return -1;
     if (cbuild__real_dir_kind(path) != 1)
-        return;
+        return -1;
+    int result = 0;
 #ifdef _WIN32
     WIN32_FIND_DATA ffd;
     char* pattern = cbuild__join_path(path, "*");
     HANDLE hFind = FindFirstFile(pattern, &ffd);
     free(pattern);
     if (hFind == INVALID_HANDLE_VALUE)
-        return;
+        return -1;
     do {
         if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0)
             continue;
         char* full = cbuild__join_path(path, ffd.cFileName);
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-                _rmdir(full);
-            } else {
-                remove_dir_recursive(ctx, full);
-            }
-        } else {
-            remove_file(ctx, full);
+        if ((ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            if (remove_dir_recursive(full) != 0) result = -1;
+        } else if (cbuild__remove_link_or_file(full) != 0) {
+            result = -1;
         }
         free(full);
     } while (FindNextFile(hFind, &ffd));
     FindClose(hFind);
-    _rmdir(path);
+    if (_rmdir(path) != 0) result = -1;
 #else
     DIR* dir = opendir(path);
     if (!dir)
-        return;
+        return -1;
     struct dirent* entry;
     while ((entry = readdir(dir))) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
             continue;
         char* full = cbuild__join_path(path, entry->d_name);
         struct stat st;
-        if (!lstat(full, &st)) {
-            if (S_ISDIR(st.st_mode)) {
-                remove_dir_recursive(ctx, full);
-            } else {
-                remove_file(ctx, full);
-            }
+        if (lstat(full, &st) != 0) {
+            result = -1;
+        } else if (S_ISDIR(st.st_mode)) {
+            if (remove_dir_recursive(full) != 0) result = -1;
+        } else if (cbuild__remove_link_or_file(full) != 0) {
+            result = -1;
         }
         free(full);
     }
     closedir(dir);
-    rmdir(path);
+    if (rmdir(path) != 0) result = -1;
 #endif
+    return result;
 }

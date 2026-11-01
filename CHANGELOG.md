@@ -20,6 +20,10 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 
 ### Fixed
 
+- `CPPFLAGS` and `CFLAGS` from the environment reach compile commands and `LDFLAGS` reaches link commands; they previously only forced rebuilds.
+- `cbuild_remove_dir` deleted the contents of symlinked directories.
+- Test timeouts left processes started by the test running.
+- Stopping `--test` with a signal left running tests behind on POSIX.
 - Subproject manifests ignore output lines that are not targets.
 - `--manifest` and `--list` printed `(null)/...` paths when the output directory was left at its default, and outdated paths when it was set after the target was created.
 - Recursive wildcards work: `src/**/*.c` matches `.c` files in `src/` and every directory below it, and wildcards in directory names (`src/*/impl.c`) match too. Previously any pattern with a wildcard before its last `/` matched nothing.

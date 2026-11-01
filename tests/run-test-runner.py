@@ -3,6 +3,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -12,9 +13,11 @@ WINDOWS = os.name == "nt"
 EXE = ".exe" if WINDOWS else ""
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "tests" / "runner work"
+TEMPLATE = ROOT / "tests" / "runner template"
 CC = os.environ.get("CC") or ("cl" if WINDOWS else "cc")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 HANG_LIMIT_SECONDS = 120
+SURVIVOR_DELAY_SECONDS = 3
 STDIN_FOR_BUILD = "input the tests must not see\n"
 
 
@@ -286,6 +289,33 @@ def a_tests_own_timeout_beats_the_default():
     expect_result(run_tests("--test-label=time_longer", "--test-timeout=1"), "time_own_longer", "PASS")
 
 
+def timeouts_kill_everything_the_test_started():
+    log = run_failing_tests("--test-label=time_tree")
+    check("timed out after 1s" in expect_result(log, "time_tree", "FAIL"), f"no timeout:\n{log}")
+    time.sleep(SURVIVOR_DELAY_SECONDS)
+    check(not (WORK / "sync" / "survivor").exists(), "a process the test started outlived its timeout")
+
+
+def stopping_the_run_stops_running_tests():
+    if WINDOWS:
+        return
+    shutil.rmtree(WORK / "sync", ignore_errors=True)
+    (WORK / "sync").mkdir()
+    process = subprocess.Popen([str(WORK / "cbuild"), "--test", "--test-label=time_tree_stopped"], cwd=WORK,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + HANG_LIMIT_SECONDS / 2
+    while not (WORK / "sync" / "started").exists():
+        if time.monotonic() > deadline or process.poll() is not None:
+            process.kill()
+            raise Failure("the test never started")
+        time.sleep(0.01)
+    process.send_signal(signal.SIGTERM)
+    status = process.wait(timeout=HANG_LIMIT_SECONDS / 2)
+    check(status == -signal.SIGTERM, f"build program exited with status {status}")
+    time.sleep(SURVIVOR_DELAY_SECONDS)
+    check(not (WORK / "sync" / "survivor").exists(), "a test outlived the run")
+
+
 def tests_run_in_parallel():
     log = run_tests("--test-label=par", "-j2")
     check("Test: 2 tests, 2 jobs" in log, f"wrong job count:\n{log}")
@@ -356,6 +386,7 @@ def build_failures_stop_the_run():
 
 
 def sections_separate_the_build_from_the_run():
+    run_tests("--test-label=res_pass")
     log = run_tests("--test-label=res_pass")
     check(re.search(r"^── Build ─+\n(?:.*\n)*?✔ Up to date\.\n\n── Test: 1 test, 1 job ─+$", log, re.MULTILINE),
           f"build and test sections are not separated:\n{log}")
@@ -573,6 +604,8 @@ SCENARIOS = [
     own_timeouts_kill_the_test,
     the_default_timeout_covers_tests_without_their_own,
     a_tests_own_timeout_beats_the_default,
+    timeouts_kill_everything_the_test_started,
+    stopping_the_run_stops_running_tests,
     tests_run_in_parallel,
     one_job_runs_tests_one_at_a_time,
     locked_tests_never_overlap,
@@ -599,13 +632,17 @@ SCENARIOS = [
 
 def main():
     shutil.rmtree(WORK, ignore_errors=True)
+    shutil.rmtree(TEMPLATE, ignore_errors=True)
     failed = 0
     try:
         shutil.copytree(ROOT / "tests" / "runner", WORK)
         compile_build_program()
+        shutil.copytree(WORK, TEMPLATE)
         for scenario in SCENARIOS:
             name = scenario.__name__.replace("_", " ")
             try:
+                shutil.rmtree(WORK)
+                shutil.copytree(TEMPLATE, WORK)
                 scenario()
             except (Failure, OSError, subprocess.TimeoutExpired) as failure:
                 print(f"test-runner: FAILED: {name}\n{failure}", file=sys.stderr)
@@ -614,6 +651,7 @@ def main():
             print(f"test-runner: ok: {name}", flush=True)
     finally:
         shutil.rmtree(WORK, ignore_errors=True)
+        shutil.rmtree(TEMPLATE, ignore_errors=True)
     if failed:
         print(f"test-runner: {failed} of {len(SCENARIOS)} scenarios failed", file=sys.stderr)
         return 1

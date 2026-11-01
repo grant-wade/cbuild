@@ -48,6 +48,7 @@ function Remove-TestArtifacts {
         "$Root\tests\project\*.log", "$Root\example\*.log"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue `
         "$Root\tests\api-build", `
+        "$Root\tests\api-remove", `
         "$Root\tests\split-build", `
         "$Root\tests\project\build", `
         "$Root\example\build", `

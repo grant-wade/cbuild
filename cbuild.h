@@ -1464,6 +1464,7 @@ static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_fil
         cbuild_argv_append(argv, t->ldflags[i]);
     for (int i = 0; i < ctx->global_ldflag_count; ++i)
         cbuild_argv_append(argv, ctx->global_ldflags[i]);
+    cbuild_argv_append_flags(argv, getenv("LDFLAGS"));
 
     if (t->type == TARGET_SHARED_LIB) {
         if (msvc) {
@@ -1488,8 +1489,6 @@ static char* cbuild__link_signature(cbuild_argv_t* argv) {
     for (int i = 0; i < argv->count; ++i) {
         append_format(&sig, "%s\n", argv->args[i]);
     }
-    const char* ev = getenv("LDFLAGS");
-    if (ev) append_format(&sig, "ENV:LDFLAGS=%s\n", ev);
     return sig;
 }
 
@@ -2537,6 +2536,8 @@ static void cbuild__compile_argv(cbuild_context_t* ctx, target_t* t, const char*
     for (int i = 0; i < t->cflag_count; ++i) {
         cbuild_argv_append(argv, t->cflags[i]);
     }
+    cbuild_argv_append_flags(argv, getenv("CPPFLAGS"));
+    cbuild_argv_append_flags(argv, getenv("CFLAGS"));
     for (int i = 0; i < t->include_count; ++i) {
         cbuild__argv_append_prefixed(argv, inc_prefix, t->include_dirs[i]);
     }
@@ -2556,11 +2557,6 @@ static char* cbuild__compile_signature(cbuild_argv_t* argv) {
     for (int i = 0; i < argv->count; ++i) {
         append_format(&sig, "%s\n", argv->args[i]);
     }
-    const char* ev;
-    ev = getenv("CFLAGS");
-    if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
-    ev = getenv("CPPFLAGS");
-    if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
     return sig;
 }
 
@@ -4550,7 +4546,7 @@ CBUILD_INTERNAL int cbuild_dispatch_flags_strict(cbuild_context_t* ctx, cbuild_f
 /* fs.c - filesystem, path, and wildcard helpers. */
 
 
-static void remove_dir_recursive(cbuild_context_t* ctx, const char* path);
+static int remove_dir_recursive(const char* path);
 
 /* Normalize path separators to forward slashes for consistent hashing/comparison */
 CBUILD_INTERNAL char* cbuild__normalize_path(const char* path) {
@@ -4612,43 +4608,6 @@ int cbuild_remove_file(const char* path) {
     if (!cbuild_file_exists(path))
         return 0;
     return unlink(path);
-}
-
-int cbuild_remove_dir(const char* path) {
-    if (!path || !*path)
-        return -1;
-    if (!cbuild_dir_exists(path))
-        return 0;
-#ifdef _WIN32
-    char cmd[PATH_MAX + 32];
-    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", path);
-    return system(cmd);
-#else
-    DIR* dir;
-    struct dirent* entry;
-    char full_path[PATH_MAX];
-    if (!(dir = opendir(path)))
-        return -1;
-    while ((entry = readdir(dir))) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-        struct stat st;
-        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            if (cbuild_remove_dir(full_path) != 0) {
-                closedir(dir);
-                return -1;
-            }
-        } else {
-            if (cbuild_remove_file(full_path) != 0) {
-                closedir(dir);
-                return -1;
-            }
-        }
-    }
-    closedir(dir);
-    return rmdir(path);
-#endif
 }
 
 int cbuild_get_cwd(char* buf, long size) {
@@ -5000,6 +4959,16 @@ static int cbuild__real_dir_kind(const char* path) {
 #endif
 }
 
+static int cbuild__remove_link_or_file(const char* path) {
+#ifdef _WIN32
+    DWORD attrs = GetFileAttributes(path);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) return _rmdir(path);
+    if (remove(path) == 0) return 0;
+    SetFileAttributes(path, FILE_ATTRIBUTE_NORMAL);
+#endif
+    return remove(path);
+}
+
 /* Returns 1 when path is the current working directory or one of its ancestors
  * (which includes the filesystem root), or when that cannot be ruled out. */
 static int cbuild__dir_contains_cwd(const char* path) {
@@ -5044,61 +5013,68 @@ CBUILD_INTERNAL void cbuild__clean_dir(cbuild_context_t* ctx, const char* path) 
                     "cbuild: not cleaning '%s': it contains the current working directory", path);
         return;
     }
-    remove_dir_recursive(ctx, path);
+    remove_dir_recursive(path);
 }
 
-/* Links are removed, never followed, so nothing outside the tree is touched. */
-static void remove_dir_recursive(cbuild_context_t* ctx, const char* path) {
+int cbuild_remove_dir(const char* path) {
     if (!path || !*path)
-        return;
+        return -1;
+    int kind = cbuild__real_dir_kind(path);
+    if (kind == 0)
+        return 0;
+    return kind < 0 ? cbuild__remove_link_or_file(path) : remove_dir_recursive(path);
+}
+
+/* Returns 0 when the whole tree is gone, -1 otherwise. Links are removed, never followed. */
+static int remove_dir_recursive(const char* path) {
+    if (!path || !*path)
+        return -1;
     if (cbuild__real_dir_kind(path) != 1)
-        return;
+        return -1;
+    int result = 0;
 #ifdef _WIN32
     WIN32_FIND_DATA ffd;
     char* pattern = cbuild__join_path(path, "*");
     HANDLE hFind = FindFirstFile(pattern, &ffd);
     free(pattern);
     if (hFind == INVALID_HANDLE_VALUE)
-        return;
+        return -1;
     do {
         if (strcmp(ffd.cFileName, ".") == 0 || strcmp(ffd.cFileName, "..") == 0)
             continue;
         char* full = cbuild__join_path(path, ffd.cFileName);
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-                _rmdir(full);
-            } else {
-                remove_dir_recursive(ctx, full);
-            }
-        } else {
-            remove_file(ctx, full);
+        if ((ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            if (remove_dir_recursive(full) != 0) result = -1;
+        } else if (cbuild__remove_link_or_file(full) != 0) {
+            result = -1;
         }
         free(full);
     } while (FindNextFile(hFind, &ffd));
     FindClose(hFind);
-    _rmdir(path);
+    if (_rmdir(path) != 0) result = -1;
 #else
     DIR* dir = opendir(path);
     if (!dir)
-        return;
+        return -1;
     struct dirent* entry;
     while ((entry = readdir(dir))) {
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, ".."))
             continue;
         char* full = cbuild__join_path(path, entry->d_name);
         struct stat st;
-        if (!lstat(full, &st)) {
-            if (S_ISDIR(st.st_mode)) {
-                remove_dir_recursive(ctx, full);
-            } else {
-                remove_file(ctx, full);
-            }
+        if (lstat(full, &st) != 0) {
+            result = -1;
+        } else if (S_ISDIR(st.st_mode)) {
+            if (remove_dir_recursive(full) != 0) result = -1;
+        } else if (cbuild__remove_link_or_file(full) != 0) {
+            result = -1;
         }
         free(full);
     }
     closedir(dir);
-    rmdir(path);
+    if (rmdir(path) != 0) result = -1;
 #endif
+    return result;
 }
 
 /* ---- src/log.c ---- */
@@ -6797,6 +6773,8 @@ typedef struct {
     CRITICAL_SECTION spawn_mutex;
 #else
     pthread_mutex_t mutex;
+    /* Process group of each running test by index, or 0. */
+    volatile sig_atomic_t* groups;
 #endif
 } cbuild_test_run_t;
 
@@ -6816,13 +6794,57 @@ static void cbuild__test_run_unlock(cbuild_test_run_t* run) {
 #endif
 }
 
+#ifndef _WIN32
+enum { CBUILD_FORWARDED_SIGNAL_COUNT = 3 };
+static const int cbuild__forwarded_signals[CBUILD_FORWARDED_SIGNAL_COUNT] = { SIGINT, SIGTERM, SIGHUP };
+static struct sigaction cbuild__previous_actions[CBUILD_FORWARDED_SIGNAL_COUNT];
+static cbuild_test_run_t* volatile cbuild__forwarding_run;
+
+static void cbuild__forward_signal(int sig) {
+    cbuild_test_run_t* run = cbuild__forwarding_run;
+    for (int i = 0; run && i < run->count; ++i) {
+        if (run->groups[i] > 0) kill(-(pid_t)run->groups[i], sig);
+    }
+    for (int i = 0; i < CBUILD_FORWARDED_SIGNAL_COUNT; ++i) {
+        if (cbuild__forwarded_signals[i] == sig) sigaction(sig, &cbuild__previous_actions[i], NULL);
+    }
+    raise(sig);
+}
+
+static void cbuild__start_forwarding_signals(cbuild_test_run_t* run) {
+    cbuild__forwarding_run = run;
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = cbuild__forward_signal;
+    sigemptyset(&action.sa_mask);
+    for (int i = 0; i < CBUILD_FORWARDED_SIGNAL_COUNT; ++i) {
+        sigaction(cbuild__forwarded_signals[i], NULL, &cbuild__previous_actions[i]);
+        if (cbuild__previous_actions[i].sa_handler != SIG_IGN) {
+            sigaction(cbuild__forwarded_signals[i], &action, NULL);
+        }
+    }
+}
+
+static void cbuild__stop_forwarding_signals(void) {
+    for (int i = 0; i < CBUILD_FORWARDED_SIGNAL_COUNT; ++i) {
+        if (cbuild__previous_actions[i].sa_handler != SIG_IGN) {
+            sigaction(cbuild__forwarded_signals[i], &cbuild__previous_actions[i], NULL);
+        }
+    }
+    cbuild__forwarding_run = NULL;
+}
+#endif
+
 /* Runs argv with stdin from the null device and stdout and stderr in log_path.
  * Returns the exit status, -1 if it could not be started, and sets *timed_out
- * when the process was killed for exceeding timeout seconds. */
-static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, const char* log_path,
+ * when the process and those it started were killed for exceeding timeout
+ * seconds. index is the test's position in the run. */
+static int cbuild__spawn_logged(cbuild_test_run_t* run, int index, cbuild_argv_t* argv, const char* log_path,
                                 int timeout, int* timed_out) {
     *timed_out = 0;
 #ifdef _WIN32
+    (void)index;
+    HANDLE job = CreateJobObjectA(NULL, NULL);
     /* Handles marked inheritable leak into any process created meanwhile, so
      * they only exist inside this critical section. */
     EnterCriticalSection(&run->spawn_mutex);
@@ -6837,6 +6859,7 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
         if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
         if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
         LeaveCriticalSection(&run->spawn_mutex);
+        if (job) CloseHandle(job);
         return -1;
     }
     STARTUPINFOA si = { 0 };
@@ -6847,26 +6870,36 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
     si.hStdError = out;
     PROCESS_INFORMATION pi = { 0 };
     char* cmdline = cbuild_argv_to_cmdline(argv);
-    BOOL ok = cmdline && CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    BOOL ok = cmdline && CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, job ? CREATE_SUSPENDED : 0, NULL, NULL, &si, &pi);
     free(cmdline);
     CloseHandle(out);
     CloseHandle(in);
     LeaveCriticalSection(&run->spawn_mutex);
-    if (!ok) return -1;
+    if (!ok) {
+        if (job) CloseHandle(job);
+        return -1;
+    }
+    if (job) {
+        if (!AssignProcessToJobObject(job, pi.hProcess)) {
+            CloseHandle(job);
+            job = NULL;
+        }
+        ResumeThread(pi.hThread);
+    }
 
     DWORD wait = WaitForSingleObject(pi.hProcess, timeout > 0 ? (DWORD)timeout * 1000 : INFINITE);
     if (wait == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 1);
+        if (!job || !TerminateJobObject(job, 1)) TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, INFINITE);
         *timed_out = 1;
     }
+    if (job) CloseHandle(job);
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return (int)exit_code;
 #else
-    (void)run;
     /* O_CLOEXEC keeps these out of processes other workers start meanwhile;
      * dup2 in the child clears it on the standard descriptors. */
     int out = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -6881,12 +6914,18 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
     posix_spawn_file_actions_adddup2(&actions, in, STDIN_FILENO);
     posix_spawn_file_actions_adddup2(&actions, out, STDOUT_FILENO);
     posix_spawn_file_actions_adddup2(&actions, out, STDERR_FILENO);
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attributes, 0);
     pid_t pid;
-    int spawn_rc = posix_spawnp(&pid, argv->args[0], &actions, NULL, argv->args, environ);
+    int spawn_rc = posix_spawnp(&pid, argv->args[0], &actions, &attributes, argv->args, environ);
+    posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     close(out);
     close(in);
     if (spawn_rc != 0) return -1;
+    run->groups[index] = (sig_atomic_t)pid;
 
     double deadline = timeout > 0 ? cbuild__now_seconds() + timeout : 0;
     int delay_ms = 1;
@@ -6896,10 +6935,11 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
         if (r == pid) break;
         if (r < 0) {
             if (errno == EINTR) continue;
+            run->groups[index] = 0;
             return -1;
         }
         if (cbuild__now_seconds() >= deadline) {
-            kill(pid, SIGKILL);
+            if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
             while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
             *timed_out = 1;
@@ -6908,6 +6948,7 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
         cbuild__sleep_ms(delay_ms);
         if (delay_ms < 50) delay_ms *= 2;
     }
+    run->groups[index] = 0;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
@@ -6959,7 +7000,7 @@ static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
     int timeout = test->timeout > 0 ? test->timeout : ctx->test_timeout;
     int timed_out = 0;
     double start = cbuild__now_seconds();
-    int rc = cbuild__spawn_logged(run, &argv, log_path, timeout, &timed_out);
+    int rc = cbuild__spawn_logged(run, index, &argv, log_path, timeout, &timed_out);
     double elapsed = cbuild__now_seconds() - start;
     cbuild_argv_free(&argv);
 
@@ -7120,11 +7161,15 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     DeleteCriticalSection(&run.mutex);
 #else
     pthread_mutex_init(&run.mutex, NULL);
+    run.groups = (volatile sig_atomic_t*)calloc((size_t)run.count, sizeof(sig_atomic_t));
+    cbuild__start_forwarding_signals(&run);
     pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * thread_count);
     for (int i = 0; i < thread_count; ++i) {
         pthread_create(&threads[i], NULL, cbuild__test_worker, &run);
     }
     for (int i = 0; i < thread_count; ++i) pthread_join(threads[i], NULL);
+    cbuild__stop_forwarding_signals();
+    free((void*)run.groups);
     pthread_mutex_destroy(&run.mutex);
 #endif
     free(threads);

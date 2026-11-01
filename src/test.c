@@ -188,6 +188,8 @@ typedef struct {
     CRITICAL_SECTION spawn_mutex;
 #else
     pthread_mutex_t mutex;
+    /* Process group of each running test by index, or 0. */
+    volatile sig_atomic_t* groups;
 #endif
 } cbuild_test_run_t;
 
@@ -207,13 +209,57 @@ static void cbuild__test_run_unlock(cbuild_test_run_t* run) {
 #endif
 }
 
+#ifndef _WIN32
+enum { CBUILD_FORWARDED_SIGNAL_COUNT = 3 };
+static const int cbuild__forwarded_signals[CBUILD_FORWARDED_SIGNAL_COUNT] = { SIGINT, SIGTERM, SIGHUP };
+static struct sigaction cbuild__previous_actions[CBUILD_FORWARDED_SIGNAL_COUNT];
+static cbuild_test_run_t* volatile cbuild__forwarding_run;
+
+static void cbuild__forward_signal(int sig) {
+    cbuild_test_run_t* run = cbuild__forwarding_run;
+    for (int i = 0; run && i < run->count; ++i) {
+        if (run->groups[i] > 0) kill(-(pid_t)run->groups[i], sig);
+    }
+    for (int i = 0; i < CBUILD_FORWARDED_SIGNAL_COUNT; ++i) {
+        if (cbuild__forwarded_signals[i] == sig) sigaction(sig, &cbuild__previous_actions[i], NULL);
+    }
+    raise(sig);
+}
+
+static void cbuild__start_forwarding_signals(cbuild_test_run_t* run) {
+    cbuild__forwarding_run = run;
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = cbuild__forward_signal;
+    sigemptyset(&action.sa_mask);
+    for (int i = 0; i < CBUILD_FORWARDED_SIGNAL_COUNT; ++i) {
+        sigaction(cbuild__forwarded_signals[i], NULL, &cbuild__previous_actions[i]);
+        if (cbuild__previous_actions[i].sa_handler != SIG_IGN) {
+            sigaction(cbuild__forwarded_signals[i], &action, NULL);
+        }
+    }
+}
+
+static void cbuild__stop_forwarding_signals(void) {
+    for (int i = 0; i < CBUILD_FORWARDED_SIGNAL_COUNT; ++i) {
+        if (cbuild__previous_actions[i].sa_handler != SIG_IGN) {
+            sigaction(cbuild__forwarded_signals[i], &cbuild__previous_actions[i], NULL);
+        }
+    }
+    cbuild__forwarding_run = NULL;
+}
+#endif
+
 /* Runs argv with stdin from the null device and stdout and stderr in log_path.
  * Returns the exit status, -1 if it could not be started, and sets *timed_out
- * when the process was killed for exceeding timeout seconds. */
-static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, const char* log_path,
+ * when the process and those it started were killed for exceeding timeout
+ * seconds. index is the test's position in the run. */
+static int cbuild__spawn_logged(cbuild_test_run_t* run, int index, cbuild_argv_t* argv, const char* log_path,
                                 int timeout, int* timed_out) {
     *timed_out = 0;
 #ifdef _WIN32
+    (void)index;
+    HANDLE job = CreateJobObjectA(NULL, NULL);
     /* Handles marked inheritable leak into any process created meanwhile, so
      * they only exist inside this critical section. */
     EnterCriticalSection(&run->spawn_mutex);
@@ -228,6 +274,7 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
         if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
         if (in != INVALID_HANDLE_VALUE) CloseHandle(in);
         LeaveCriticalSection(&run->spawn_mutex);
+        if (job) CloseHandle(job);
         return -1;
     }
     STARTUPINFOA si = { 0 };
@@ -238,26 +285,36 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
     si.hStdError = out;
     PROCESS_INFORMATION pi = { 0 };
     char* cmdline = cbuild_argv_to_cmdline(argv);
-    BOOL ok = cmdline && CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    BOOL ok = cmdline && CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, job ? CREATE_SUSPENDED : 0, NULL, NULL, &si, &pi);
     free(cmdline);
     CloseHandle(out);
     CloseHandle(in);
     LeaveCriticalSection(&run->spawn_mutex);
-    if (!ok) return -1;
+    if (!ok) {
+        if (job) CloseHandle(job);
+        return -1;
+    }
+    if (job) {
+        if (!AssignProcessToJobObject(job, pi.hProcess)) {
+            CloseHandle(job);
+            job = NULL;
+        }
+        ResumeThread(pi.hThread);
+    }
 
     DWORD wait = WaitForSingleObject(pi.hProcess, timeout > 0 ? (DWORD)timeout * 1000 : INFINITE);
     if (wait == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 1);
+        if (!job || !TerminateJobObject(job, 1)) TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, INFINITE);
         *timed_out = 1;
     }
+    if (job) CloseHandle(job);
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return (int)exit_code;
 #else
-    (void)run;
     /* O_CLOEXEC keeps these out of processes other workers start meanwhile;
      * dup2 in the child clears it on the standard descriptors. */
     int out = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -272,12 +329,18 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
     posix_spawn_file_actions_adddup2(&actions, in, STDIN_FILENO);
     posix_spawn_file_actions_adddup2(&actions, out, STDOUT_FILENO);
     posix_spawn_file_actions_adddup2(&actions, out, STDERR_FILENO);
+    posix_spawnattr_t attributes;
+    posix_spawnattr_init(&attributes);
+    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attributes, 0);
     pid_t pid;
-    int spawn_rc = posix_spawnp(&pid, argv->args[0], &actions, NULL, argv->args, environ);
+    int spawn_rc = posix_spawnp(&pid, argv->args[0], &actions, &attributes, argv->args, environ);
+    posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     close(out);
     close(in);
     if (spawn_rc != 0) return -1;
+    run->groups[index] = (sig_atomic_t)pid;
 
     double deadline = timeout > 0 ? cbuild__now_seconds() + timeout : 0;
     int delay_ms = 1;
@@ -287,10 +350,11 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
         if (r == pid) break;
         if (r < 0) {
             if (errno == EINTR) continue;
+            run->groups[index] = 0;
             return -1;
         }
         if (cbuild__now_seconds() >= deadline) {
-            kill(pid, SIGKILL);
+            if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
             while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
             *timed_out = 1;
@@ -299,6 +363,7 @@ static int cbuild__spawn_logged(cbuild_test_run_t* run, cbuild_argv_t* argv, con
         cbuild__sleep_ms(delay_ms);
         if (delay_ms < 50) delay_ms *= 2;
     }
+    run->groups[index] = 0;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
@@ -350,7 +415,7 @@ static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
     int timeout = test->timeout > 0 ? test->timeout : ctx->test_timeout;
     int timed_out = 0;
     double start = cbuild__now_seconds();
-    int rc = cbuild__spawn_logged(run, &argv, log_path, timeout, &timed_out);
+    int rc = cbuild__spawn_logged(run, index, &argv, log_path, timeout, &timed_out);
     double elapsed = cbuild__now_seconds() - start;
     cbuild_argv_free(&argv);
 
@@ -511,11 +576,15 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     DeleteCriticalSection(&run.mutex);
 #else
     pthread_mutex_init(&run.mutex, NULL);
+    run.groups = (volatile sig_atomic_t*)calloc((size_t)run.count, sizeof(sig_atomic_t));
+    cbuild__start_forwarding_signals(&run);
     pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * thread_count);
     for (int i = 0; i < thread_count; ++i) {
         pthread_create(&threads[i], NULL, cbuild__test_worker, &run);
     }
     for (int i = 0; i < thread_count; ++i) pthread_join(threads[i], NULL);
+    cbuild__stop_forwarding_signals();
+    free((void*)run.groups);
     pthread_mutex_destroy(&run.mutex);
 #endif
     free(threads);

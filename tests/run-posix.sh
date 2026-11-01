@@ -19,6 +19,7 @@ cleanup() {
           "$ROOT/tests/project"/*.log \
           "$ROOT/example"/*.log
     rm -rf "$ROOT/tests/api-build" \
+           "$ROOT/tests/api-remove" \
            "$ROOT/tests/split-build" \
            "$ROOT/tests/project/build" \
            "$ROOT/example/build" \

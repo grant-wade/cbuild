@@ -454,6 +454,7 @@ static void cbuild__link_argv(cbuild_context_t* ctx, target_t* t, char** obj_fil
         cbuild_argv_append(argv, t->ldflags[i]);
     for (int i = 0; i < ctx->global_ldflag_count; ++i)
         cbuild_argv_append(argv, ctx->global_ldflags[i]);
+    cbuild_argv_append_flags(argv, getenv("LDFLAGS"));
 
     if (t->type == TARGET_SHARED_LIB) {
         if (msvc) {
@@ -478,8 +479,6 @@ static char* cbuild__link_signature(cbuild_argv_t* argv) {
     for (int i = 0; i < argv->count; ++i) {
         append_format(&sig, "%s\n", argv->args[i]);
     }
-    const char* ev = getenv("LDFLAGS");
-    if (ev) append_format(&sig, "ENV:LDFLAGS=%s\n", ev);
     return sig;
 }
 

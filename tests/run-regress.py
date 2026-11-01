@@ -21,6 +21,7 @@ WINDOWS = os.name == "nt"
 EXE = ".exe" if WINDOWS else ""
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "tests" / "regress work"
+TEMPLATE = ROOT / "tests" / "regress template"
 CC = os.environ.get("CC") or ("cl" if WINDOWS else "cc")
 
 APP = Path("dist") / ("regress_app" + EXE)
@@ -164,6 +165,7 @@ def generated_files_respect_dependencies():
 
 
 def explicit_output_paths():
+    build()
     check(path(APP).is_file(), f"{APP} was not produced")
     check(not path("build/regress_app" + EXE).exists(),
           "explicit output path was ignored")
@@ -171,6 +173,7 @@ def explicit_output_paths():
 
 
 def compile_commands_use_target_settings():
+    build()
     build("--compile-commands", "-j2")
     entries = json.loads(read("build/compile_commands.json"))
     by_file = {entry["file"]: entry["arguments"] for entry in entries}
@@ -189,11 +192,13 @@ def compile_commands_use_target_settings():
 
 def repeated_builds_are_noops():
     # Includes dependency paths with spaces, which used to defeat the check.
+    build()
     for round_number in (1, 2, 3):
         expect_noop(f"repeated build {round_number}")
 
 
 def edits_within_the_same_second_are_noticed():
+    build()
     started = time.time()
     settle()
     write("src/app.c", read("src/app.c") + "/* edited */\n")
@@ -209,12 +214,14 @@ def edits_within_the_same_second_are_noticed():
 
 
 def header_edits_rebuild_their_includers():
+    build()
     settle()
     touch("space dir/include/spaced.h")
     expect_steps("shared header edit", build(), "COMPILE", 2)
 
 
 def removed_headers():
+    build()
     # Still included: the build has to notice and fail, every time.
     os.replace(path("space dir/include/extra.h"), path("extra.h.saved"))
     expect_build_failure("missing header")
@@ -234,6 +241,7 @@ def removed_headers():
 
 
 def failed_compilation():
+    build()
     settle()
     original = read("src/app.c")
     write("src/app.c", original + "#error broken on purpose\n")
@@ -244,15 +252,16 @@ def failed_compilation():
     log = build()
     expect_steps("fixed source", log, "COMPILE", 1)
     expect_steps("fixed source", log, "LINK", 1)
-    expect_app_output("generated=41 util=3 mode=0")
+    expect_app_output("generated=41 util=7 mode=0")
 
 
 def changing_flags():
+    build()
     define = {"REGRESS_APP_DEFINE": "MODE=2"}
     log = build(env=define)
     expect_steps("added define", log, "COMPILE", 1, "app.c")
     expect_steps("added define", log, "COMPILE", 1)
-    expect_app_output("generated=41 util=3 mode=2")
+    expect_app_output("generated=41 util=7 mode=2")
     expect_noop("unchanged define", env=define)
     expect_steps("removed define", build(), "COMPILE", 1)
 
@@ -263,7 +272,32 @@ def changing_flags():
     expect_steps("removed cflags", build(), "COMPILE", 1)
 
 
+def with_inherited(name, flags):
+    return {name: f"{os.environ.get(name, '')} {flags}".strip()}
+
+
+def environment_flags_reach_the_compiler_and_linker():
+    build()
+    cflags = with_inherited("CFLAGS", "-DMODE=2")
+    expect_steps("added CFLAGS", build(env=cflags), "COMPILE", 3)
+    expect_app_output("generated=41 util=7 mode=2")
+    expect_noop("unchanged CFLAGS", env=cflags)
+
+    build(env=with_inherited("CPPFLAGS", "-DMODE=3"))
+    expect_app_output("generated=41 util=7 mode=3")
+
+    build()
+    expect_app_output("generated=41 util=7 mode=0")
+
+    missing = "cbuild_no_such_library.lib" if WINDOWS else "-lcbuild_no_such_library"
+    status, log = cbuild(env=with_inherited("LDFLAGS", missing))
+    check(status != 0, f"LDFLAGS did not reach the linker:\n{log}")
+    build()
+    expect_noop("after removing LDFLAGS")
+
+
 def deleted_intermediates_come_back():
+    build()
     for entry in build_outputs("build/obj_util", "object"):
         entry.unlink()
     expect_steps("deleted object", build(), "COMPILE", 1)
@@ -293,6 +327,7 @@ def deleted_intermediates_come_back():
 
 
 def rebuilt_generator_regenerates():
+    build()
     settle()
     write("src/gen.c", read("src/gen.c").replace("GENERATED_VALUE 41",
                                                  "GENERATED_VALUE 42"))
@@ -300,7 +335,7 @@ def rebuilt_generator_regenerates():
     expect_steps("generator edit", log, "COMPILE", 1, "gen.c")
     expect_steps("generator edit", log, "FILE_DEP", 1)
     expect_steps("generator edit", log, "COMPILE", 1, "app.c")
-    expect_app_output("generated=42 util=3 mode=0")
+    expect_app_output("generated=42 util=7 mode=0")
     expect_noop("after regenerating")
 
 
@@ -311,6 +346,7 @@ def command_cycles_are_reported():
 
 
 def clean_removes_only_outputs():
+    build()
     path("precious").mkdir()
     write("precious/keep.txt", "keep me\n")
     path("build/nested").mkdir()
@@ -360,6 +396,7 @@ SCENARIOS = [
     removed_headers,
     failed_compilation,
     changing_flags,
+    environment_flags_reach_the_compiler_and_linker,
     deleted_intermediates_come_back,
     rebuilt_generator_regenerates,
     command_cycles_are_reported,
@@ -369,13 +406,17 @@ SCENARIOS = [
 
 def main():
     shutil.rmtree(WORK, ignore_errors=True)
+    shutil.rmtree(TEMPLATE, ignore_errors=True)
     try:
         shutil.copytree(ROOT / "tests" / "regress", WORK)
         path("dist").mkdir()
         write("dist/README.txt", "not a build output\n")
         compile_build_program()
+        shutil.copytree(WORK, TEMPLATE)
         for scenario in SCENARIOS:
             name = scenario.__name__.replace("_", " ")
+            shutil.rmtree(WORK)
+            shutil.copytree(TEMPLATE, WORK)
             try:
                 scenario()
             except Failure as failure:
@@ -384,6 +425,7 @@ def main():
             print(f"regress: ok: {name}", flush=True)
     finally:
         shutil.rmtree(WORK, ignore_errors=True)
+        shutil.rmtree(TEMPLATE, ignore_errors=True)
     print("regress: all scenarios passed")
     return 0
 

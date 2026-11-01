@@ -41,6 +41,8 @@ static void cbuild__compile_argv(cbuild_context_t* ctx, target_t* t, const char*
     for (int i = 0; i < t->cflag_count; ++i) {
         cbuild_argv_append(argv, t->cflags[i]);
     }
+    cbuild_argv_append_flags(argv, getenv("CPPFLAGS"));
+    cbuild_argv_append_flags(argv, getenv("CFLAGS"));
     for (int i = 0; i < t->include_count; ++i) {
         cbuild__argv_append_prefixed(argv, inc_prefix, t->include_dirs[i]);
     }
@@ -60,11 +62,6 @@ static char* cbuild__compile_signature(cbuild_argv_t* argv) {
     for (int i = 0; i < argv->count; ++i) {
         append_format(&sig, "%s\n", argv->args[i]);
     }
-    const char* ev;
-    ev = getenv("CFLAGS");
-    if (ev) append_format(&sig, "ENV:CFLAGS=%s\n", ev);
-    ev = getenv("CPPFLAGS");
-    if (ev) append_format(&sig, "ENV:CPPFLAGS=%s\n", ev);
     return sig;
 }
 

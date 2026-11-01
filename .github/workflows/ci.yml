@@ -79,6 +79,7 @@ jobs:
           CC: clang
           CXX: clang++
           CFLAGS: -std=c11 -Wall -Wextra -Wpedantic -Werror -g -fno-omit-frame-pointer -fsanitize=address,undefined
+          LDFLAGS: -fsanitize=address,undefined
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |

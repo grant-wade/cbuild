@@ -86,6 +86,9 @@ int main(int argc, char **argv) {
     cbuild_test_set_timeout(ctx, PROBE("time_negative", "time_default", "--sleep", "60000"), -5);
     cbuild_test_set_timeout(ctx, PROBE("time_own_longer", "time_longer", "--sleep", "2000"), 60);
 
+    cbuild_test_set_timeout(ctx, PROBE("time_tree", "time_tree", "--spawn-touch", "3000", "sync/survivor"), 1);
+    PROBE("time_tree_stopped", "time_tree_stopped", "--touch", "sync/started", "--spawn-touch", "3000", "sync/survivor");
+
     PROBE("par_one", "par", "--rendezvous", "sync/par_one", "sync/par_two");
     PROBE("par_two", "par", "--rendezvous", "sync/par_two", "sync/par_one");
     for (int i = 0; i < 3; ++i) {

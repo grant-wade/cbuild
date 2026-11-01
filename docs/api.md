@@ -243,9 +243,9 @@ int cbuild_run_tests(cbuild_context_t *ctx, const char *label,
                      const char *pattern);
 ```
 
-When `target` is an executable, the test runs its output with `args` as the arguments; otherwise `args[0]` names the program. The target and any added dependencies are built before tests start. Exit code 0 passes, the skip code (if set) skips, and anything else, including a timeout, fails. Tests that share a lock never run at the same time.
+When `target` is an executable, the test runs its output with `args` as the arguments; otherwise `args[0]` names the program. The target and any added dependencies are built before tests start. Exit code 0 passes, the skip code (if set) skips, and anything else, including a timeout, fails. A timeout kills the test and the processes it started. Tests that share a lock never run at the same time.
 
-`./cbuild --test` builds what the selected tests need and runs them on `-j` workers. Standard input is the null device, and each test's output goes to `<output dir>/tests/<name>.log`; the output of a failed test is also printed. Options:
+`./cbuild --test` builds what the selected tests need and runs them on `-j` workers. Standard input is the null device, and each test's output goes to `<output dir>/tests/<name>.log`; the output of a failed test is also printed. On POSIX, each test runs in its own process group, and `SIGINT`, `SIGTERM`, and `SIGHUP` sent to the build program reach running tests. Options:
 
 | Option | Effect |
 | --- | --- |
@@ -307,6 +307,8 @@ int cbuild_expand_wildcard_recursive(const char *directory,
                                      char ***files, int *file_count,
                                      int *capacity);
 ```
+
+`cbuild_remove_dir` removes a directory tree and returns `0` when it is gone or never existed, `-1` otherwise. It removes symbolic links and Windows junctions without following them.
 
 ## Convenience macros
 
