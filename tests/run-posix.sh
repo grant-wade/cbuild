@@ -182,6 +182,14 @@ cd "$ROOT/example"
 # shellcheck disable=SC2086
 $CC $CFLAGS build.c -o cbuild
 ./cbuild > example-build.log
+test "$(grep -c "Build" example-build.log)" = 2
+grep -q "COMPILE.*src/math.c" example-build.log
 ./cbuild --run=run > example-run.log
 grep -q "2 + 3 = 5" example-run.log
+grep -q "Run: run" example-run.log
+./cbuild --test > example-test.log
+grep -q " 0 failed" example-test.log
+MATH_SLOW_TESTS=1 ./cbuild --test --test-label=slow > example-test-slow.log
+grep -q "Tests: 1 passed" example-test-slow.log
 ./cbuild --clean > example-clean.log
+test "$(grep -c "Clean complete" example-clean.log)" = 1

@@ -134,6 +134,9 @@ int main(int argc, char **argv) {
     cbuild_register_flag(ctx, "after-check", 0, 0, CBUILD_FLAG_AFTER_BUILD, "Print after the build",
                          print_flag, "after-flag-ran");
 
+    const char *late_dir = getenv("RUNNER_LATE_OUTDIR");
+    if (late_dir && *late_dir) cbuild_set_output_dir(ctx, late_dir);
+
     int result = cbuild_run(ctx, argc, argv);
     cbuild_context_free(ctx);
     return result;

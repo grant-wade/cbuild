@@ -45,6 +45,12 @@ void *cbuild_get_user_data(cbuild_context_t *ctx);
 
 `cbuild_reset` releases graph state and reinitializes the context for reuse. `cbuild_teardown` releases internal state without freeing the context itself. Most applications should simply call `cbuild_context_free`.
 
+Builds, test runs, subcommands, and cleans open each phase with a `CBUILD_LOG_SECTION` message holding its title, such as `Build` or `Run: app`. Steps logged before the first phase, such as a command a build program runs while defining its graph, open a `Setup` section. A build ends with `Up to date.` when it did nothing, or `Build succeeded (...)` with its compile, link, and command counts and elapsed time, subprojects included. `COMPILE` steps show `[n/total]` for the sources being compiled in that target.
+
+Subproject builds and cleans run with the `CBUILD_NESTED` environment variable set to the subproject's alias. A nested build prints no section headers or end-of-build status, names itself on its first step, and reports its counts to its parent through a temporary `.cbuild-nested-report` file in its directory.
+
+The default logger uses color on terminals. `NO_COLOR` turns it off, `CLICOLOR_FORCE` turns it on when output is not a terminal, and `NO_COLOR` wins when both are set. `TERM=dumb` also turns it off.
+
 ## Running, building, and cleaning
 
 ```c

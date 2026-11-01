@@ -27,17 +27,23 @@ def check(condition, message):
         raise Failure(message)
 
 
-def cbuild(*args, env=None):
-    """Run the build program; returns (exit status, combined output without colors)."""
+def cbuild_raw(*args, env=None, cwd=WORK):
+    """Run the build program in cwd; returns (exit status, combined output)."""
     shutil.rmtree(WORK / "sync", ignore_errors=True)
     (WORK / "sync").mkdir()
     full_env = dict(os.environ)
     full_env.update(env or {})
     result = subprocess.run(
-        [str(WORK / ("cbuild" + EXE)), *args], cwd=WORK, env=full_env, input=STDIN_FOR_BUILD,
+        [str(cwd / ("cbuild" + EXE)), *args], cwd=cwd, env=full_env, input=STDIN_FOR_BUILD,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         encoding="utf-8", errors="replace", timeout=HANG_LIMIT_SECONDS)
-    return result.returncode, ANSI_ESCAPE.sub("", result.stdout)
+    return result.returncode, result.stdout
+
+
+def cbuild(*args, env=None, cwd=WORK):
+    """Run the build program in cwd; returns (exit status, combined output without colors)."""
+    status, log = cbuild_raw(*args, env=env, cwd=cwd)
+    return status, ANSI_ESCAPE.sub("", log)
 
 
 def run_tests(*args, env=None):
@@ -91,7 +97,7 @@ def read_log(name):
     return (WORK / "build" / "tests" / f"{name}.log").read_text(encoding="utf-8")
 
 
-def compile_build_program():
+def compile_build_program(cwd=WORK):
     if WINDOWS:
         command = [CC, "/nologo", "/std:c11", "/W4", "/D_CRT_SECURE_NO_WARNINGS",
                    f"/I{ROOT}", "build.c", "/Fe:cbuild.exe"]
@@ -99,7 +105,7 @@ def compile_build_program():
         flags = os.environ.get("CFLAGS") or "-std=c11 -Wall -Wextra -Wpedantic -Werror"
         command = [*shlex.split(CC), *shlex.split(flags), f"-I{ROOT}",
                    "build.c", "-o", "cbuild"]
-    subprocess.run(command, cwd=WORK, check=True)
+    subprocess.run(command, cwd=cwd, check=True)
 
 
 def listing_builds_nothing():
@@ -282,12 +288,12 @@ def a_tests_own_timeout_beats_the_default():
 
 def tests_run_in_parallel():
     log = run_tests("--test-label=par", "-j2")
-    check("Running 2 tests with 2 jobs" in log, f"wrong job count:\n{log}")
+    check("Test: 2 tests, 2 jobs" in log, f"wrong job count:\n{log}")
 
 
 def one_job_runs_tests_one_at_a_time():
     log = run_tests("--test-label=serial", "-j1")
-    check("Running 3 tests with 1 job\n" in log, f"wrong job count:\n{log}")
+    check("Test: 3 tests, 1 job " in log, f"wrong job count:\n{log}")
     expect_summary(log, 3, 0, 0)
 
 
@@ -346,7 +352,186 @@ def build_failures_stop_the_run():
         log = run_failing_tests(flag)
         check("Build failed; tests not run." in log, f"no build failure reported:\n{log}")
         check(ran_tests(log) == [], f"tests ran after a failed build:\n{log}")
-        check("Running" not in log, f"runner started after a failed build:\n{log}")
+        check("Test:" not in log, f"runner started after a failed build:\n{log}")
+
+
+def sections_separate_the_build_from_the_run():
+    log = run_tests("--test-label=res_pass")
+    check(re.search(r"^── Build ─+\n(?:.*\n)*?✔ Up to date\.\n\n── Test: 1 test, 1 job ─+$", log, re.MULTILINE),
+          f"build and test sections are not separated:\n{log}")
+
+
+def nested_builds_report_only_their_steps_and_errors():
+    nested = {"CBUILD_NESTED": "sub"}
+    shutil.rmtree(WORK / "build", ignore_errors=True)
+    status, log = cbuild("--target=versioned", env=nested)
+    check(status == 0, f"nested build failed:\n{log}")
+    check("──" not in log and "Build succeeded" not in log, f"nested build was not quiet:\n{log}")
+    check(log.count("build subproject sub") == 1, f"nested build did not name itself once:\n{log}")
+
+    status, log = cbuild("--target=versioned", env=nested)
+    check(status == 0 and log == "", f"up-to-date nested build printed output:\n{log}")
+
+    status, log = cbuild("--target=broken", env=nested)
+    check(status != 0 and "Compilation failed" in log, f"nested build hid its error:\n{log}")
+    check("✖" not in log, f"nested build printed a final failure:\n{log}")
+
+
+def plain_builds_and_cleans_have_sections():
+    status, log = cbuild("--target=versioned")
+    check(status == 0 and re.search(r"^── Build ─+$", log, re.MULTILINE), f"no build section:\n{log}")
+    status, log = cbuild("--target=versioned")
+    check(status == 0 and "✔ Up to date." in log, f"no up-to-date status:\n{log}")
+    status, log = cbuild("--clean")
+    check(status == 0 and re.search(r"^── Clean ─+$", log, re.MULTILINE), f"no clean section:\n{log}")
+
+
+def color_follows_the_environment():
+    plain = {"NO_COLOR": "", "CLICOLOR_FORCE": ""}
+    _, log = cbuild_raw("--test", "--test-label=res_pass", env=plain)
+    check("\x1b" not in log, f"piped output has color:\n{log!r}")
+
+    forced = {"NO_COLOR": "", "CLICOLOR_FORCE": "1"}
+    for label, expected in (("res_pass", "\x1b[32mPASS"), ("res_skip", "\x1b[33mSKIP"), ("res_fail", "\x1b[31mFAIL")):
+        _, log = cbuild_raw("--test", f"--test-label={label}", env=forced)
+        check(expected in log, f"expected {expected!r} for {label}:\n{log!r}")
+
+    _, log = cbuild_raw("--test", "--test-label=res_pass", env={"NO_COLOR": "1", "CLICOLOR_FORCE": "1"})
+    check("\x1b" not in log, f"NO_COLOR did not win:\n{log!r}")
+
+
+def copy_example_project():
+    """Copy the repository example and compile its build program; returns its directory."""
+    parent = WORK / "example-copy"
+    project = parent / "example"
+    parent.mkdir()
+    shutil.copy2(ROOT / "cbuild.h", parent / "cbuild.h")
+    shutil.copytree(ROOT / "example", project, ignore=shutil.ignore_patterns(
+        "build", "cbuild", "cbuild.exe", "*.old", "*.obj", "*.log", "compile_commands.json"))
+    compile_build_program(project)
+    return project
+
+
+def expect_summary_matches_steps(log):
+    compiled = len(re.findall(r"^COMPILE\b", log, re.MULTILINE))
+    linked = len(re.findall(r"^LINK\b", log, re.MULTILINE))
+    commands = len(re.findall(r"^COMMAND\b", log, re.MULTILINE)) - log.count("build subproject")
+    commands -= log.count("bootstrap math subproject")
+    parts = [f"{count} {name}" for count, name in ((compiled, "compiled"), (linked, "linked")) if count]
+    if commands:
+        parts.append(f"{commands} command{'' if commands == 1 else 's'}")
+    expected = f"Build succeeded ({', '.join(parts)}, "
+    check(expected in log, f"expected '{expected}':\n{log}")
+
+
+SETUP_CHILD_BUILD = """
+#define CBUILD_IMPLEMENTATION
+#include "cbuild.h"
+
+int main(int argc, char **argv) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    if (cbuild_run_command(ctx, cbuild_command(ctx, "prepare", "echo prepared")) != 0) return 1;
+    cbuild_add_source(ctx, cbuild_static_library(ctx, "Setup"), "setup.c");
+    int result = cbuild_run(ctx, argc, argv);
+    cbuild_context_free(ctx);
+    return result;
+}
+"""
+
+SETUP_PARENT_BUILD = """
+#define CBUILD_IMPLEMENTATION
+#include "cbuild.h"
+
+#ifdef _WIN32
+#define CHILD_EXE ".\\\\cbuild.exe"
+#else
+#define CHILD_EXE "./cbuild"
+#endif
+
+int main(int argc, char **argv) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    subproject_t *child = cbuild_add_subproject(ctx, "child", "child", CHILD_EXE);
+    target_t *setup = cbuild_subproject_get_target(ctx, child, "Setup");
+    if (!setup) return 1;
+    target_t *app = cbuild_executable(ctx, "app");
+    cbuild_add_source(ctx, app, "main.c");
+    cbuild_add_link_target(ctx, app, setup);
+    int result = cbuild_run(ctx, argc, argv);
+    cbuild_context_free(ctx);
+    return result;
+}
+"""
+
+
+def setup_output_does_not_confuse_the_manifest():
+    parent = WORK / "setup-manifest"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "build.c").write_text(SETUP_CHILD_BUILD, encoding="utf-8")
+    (child / "setup.c").write_text("int setup_value(void) { return 7; }\n", encoding="utf-8")
+    (parent / "build.c").write_text(SETUP_PARENT_BUILD, encoding="utf-8")
+    (parent / "main.c").write_text(
+        "int setup_value(void);\nint main(void) { return setup_value() == 7 ? 0 : 1; }\n", encoding="utf-8")
+    compile_build_program(child)
+    compile_build_program(parent)
+
+    _, manifest = cbuild("--manifest", cwd=child)
+    check("── Setup" in manifest, f"child did not print its setup section:\n{manifest}")
+    check("static_lib Setup build/" in manifest, f"manifest path does not use the default directory:\n{manifest}")
+    for flag in ("--list", "--graph", "--deps=Setup"):
+        _, log = cbuild(flag, cwd=child)
+        check("(null)" not in log, f"{flag} printed a null path:\n{log}")
+    status, log = cbuild(cwd=parent)
+    check(status == 0 and "Build succeeded" in log, f"subproject target did not build and link:\n{log}")
+
+
+def listings_show_the_paths_builds_use():
+    late = {"RUNNER_LATE_OUTDIR": "late"}
+    for flag in ("--list", "--manifest"):
+        status, log = cbuild(flag, env=late)
+        check(status == 0 and f"late/probe{EXE}" in log, f"{flag} ignored the output directory:\n{log}")
+        check(f"build/probe{EXE}" not in log, f"{flag} printed an outdated path:\n{log}")
+    status, log = cbuild("--target=versioned", env=late)
+    check(status == 0 and (WORK / "late" / ("versioned" + EXE)).is_file(), f"build ignored the output directory:\n{log}")
+    shutil.rmtree(WORK / "late")
+
+
+def subprojects_report_through_their_parent():
+    project = copy_example_project()
+    source = project / "lib" / "src" / "math.c"
+    original = source.read_text(encoding="utf-8")
+
+    status, log = cbuild(cwd=project)
+    check(status == 0, f"example build failed:\n{log}")
+    expect_summary_matches_steps(log)
+    check(re.search(r"\A── Setup ─+\nCOMMAND\s+bootstrap math subproject\n(?:.*\n)*?\n── Build ─+$", log, re.MULTILINE),
+          f"bootstrap is not in a setup section:\n{log}")
+    check(log.count("Build succeeded") == 1 and log.count("── Build") == 1, f"subproject was not nested:\n{log}")
+    check(log.count("build subproject math_project") == 1, f"subproject was not named once:\n{log}")
+    check(re.search(r"^COMPILE\s+\[2/2\] src/", log, re.MULTILINE), f"no compile progress:\n{log}")
+
+    status, log = cbuild(cwd=project)
+    check(status == 0 and "✔ Up to date." in log, f"no-op build did not say so:\n{log}")
+    check("COMMAND" not in log, f"no-op build showed the subproject:\n{log}")
+    check("Setup" not in log, f"no-op build had a setup section:\n{log}")
+
+    time.sleep(0.1)
+    source.write_text(original + "\n", encoding="utf-8", newline="\n")
+    status, log = cbuild(cwd=project)
+    check(status == 0 and "build subproject math_project" in log, f"edited subproject did not rebuild:\n{log}")
+    expect_summary_matches_steps(log)
+
+    time.sleep(0.1)
+    source.write_text(original + "\nnot valid c\n", encoding="utf-8", newline="\n")
+    status, log = cbuild(cwd=project)
+    check(status != 0 and "Compilation failed" in log, f"broken subproject built:\n{log}")
+    check(log.count("✖") == 1 and "✖ Build failed." in log, f"expected one final failure line:\n{log}")
+
+    time.sleep(0.1)
+    source.write_text(original, encoding="utf-8", newline="\n")
+    status, log = cbuild("--clean", cwd=project)
+    check(status == 0 and log.count("Clean complete") == 1, f"subproject clean was not nested:\n{log}")
+    check(log.count("Cleaning build outputs") == 1, f"subproject clean printed its steps:\n{log}")
 
 
 def unselected_broken_targets_do_not_matter():
@@ -357,7 +542,7 @@ def unselected_broken_targets_do_not_matter():
 def flag_phases_wrap_the_run():
     log = run_tests("--test-label=res_pass", "--before-check", "--after-check")
     positions = [log.find(marker) for marker in
-                 ("before-flag-ran", "Running 1 test", "Tests: 1 passed", "after-flag-ran")]
+                 ("before-flag-ran", "Test: 1 test", "Tests: 1 passed", "after-flag-ran")]
     check(-1 not in positions and positions == sorted(positions), f"wrong phase order:\n{log}")
 
     log = run_failing_tests("--test-label=res_fail", "--before-check", "--after-check")
@@ -400,8 +585,15 @@ SCENARIOS = [
     up_to_date_tests_rerun_without_compiling,
     source_edits_rebuild_before_the_test_runs,
     build_failures_stop_the_run,
+    sections_separate_the_build_from_the_run,
     unselected_broken_targets_do_not_matter,
     flag_phases_wrap_the_run,
+    color_follows_the_environment,
+    nested_builds_report_only_their_steps_and_errors,
+    plain_builds_and_cleans_have_sections,
+    subprojects_report_through_their_parent,
+    setup_output_does_not_confuse_the_manifest,
+    listings_show_the_paths_builds_use,
 ]
 
 

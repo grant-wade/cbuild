@@ -19,11 +19,11 @@ The test suite is intentionally toolchain-free beyond a C/C++ compiler, Python 3
 - `compile_commands.json` generation and JSON parsing
 - Target listing/filtering, graph and reverse-dependency output, manifests, custom flags (in every phase), and subcommands
 - `cbuild_spawn` output capture, exit status, and argument validation; `cbuild_get_flag_value` parsing; `cbuild_add_test` validation; `cbuild_run_tests` selection and return values
-- Test framework (`tests/runner`, all platforms): listing and selection, pass, skip, and failure reporting, exit status, log contents and locations, standard input, environment, argument passing, timeouts, parallelism, locks, build dependencies, build failures, and flag phases
+- Test framework (`tests/runner`, all platforms): listing and selection, pass, skip, and failure reporting, exit status, log contents and locations, standard input, environment, argument passing, timeouts, parallelism, locks, build dependencies, build failures, flag phases, output sections and status lines, color, and subproject reporting
 - Self-rebuilding build programs
 - Rebuild-correctness regressions (`tests/regress`, all platforms): paths containing spaces, edits made within a second of the previous build, removed headers, failed compilation, changed flags, deleted intermediate outputs, repeated no-op builds, explicit output paths, generator dependencies, and command dependency cycles
 - `--clean` safety: symbolic links and Windows junctions, files outside the build outputs, and output directories that contain the project
-- Subproject discovery, build, link, run, and clean behavior through the repository example
+- Subproject discovery, build, link, run, test, and clean behavior through the repository example
 
 ## Local use
 

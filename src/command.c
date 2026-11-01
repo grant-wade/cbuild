@@ -79,7 +79,12 @@ int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
         }
     }
 
-    cbuild__log_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
+    if (cmd->subproject) {
+        cbuild__forget_subproject_report(cmd->subproject);
+    } else {
+        cbuild__log_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
+        ctx->build_commands++;
+    }
 
     int rc = 0;
 
@@ -107,7 +112,8 @@ int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
     cmd->in_progress = 0;
     cmd->result = rc;
 
-    if (rc != 0) {
+    int failure_reported = cmd->subproject && cbuild__collect_subproject_report(ctx, cmd->subproject);
+    if (rc != 0 && !failure_reported) {
         cbuild__log_status(ctx, 0, "Command failed: %s", cmd->name);
     }
 

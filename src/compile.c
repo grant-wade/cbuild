@@ -376,6 +376,19 @@ static void enqueue_compile_job(cbuild_context_t* ctx, target_t* target, int sou
     ctx->job_count++;
 }
 
+/* Fills obj and dep, each of size bytes, with the paths for the source's object and dependency files. */
+static void cbuild__object_paths(target_t* t, const char* src, char* obj, char* dep, size_t size) {
+    const char* slash = strrchr(src, '/');
+    const char* bslash = strrchr(src, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    const char* base = slash ? slash + 1 : src;
+    const char* dot = strrchr(base, '.');
+    size_t len = dot ? (size_t)(dot - base) : strlen(base);
+    unsigned h = cbuild__hash_path(src);
+    snprintf(obj, size, "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
+    snprintf(dep, size, "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+}
+
 #ifdef _WIN32
 
 static DWORD WINAPI compile_worker(void* arg) {
@@ -390,36 +403,24 @@ static DWORD WINAPI compile_worker(void* arg) {
 
         int job_index = ctx->jobs_completed++;
         compile_job_t job = ctx->job_queue[job_index];
+        target_t* t = job.target;
+        const char* src = t->sources[job.source_index];
+        cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "[%d/%d] %s", job_index + 1, ctx->job_count, src);
         LeaveCriticalSection(&ctx->queue_mutex);
 
-        target_t* t = job.target;
-        int i = job.source_index;
-        const char* src = t->sources[i];
-        const char* slash = strrchr(src, '/');
-        const char* bslash = strrchr(src, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
-        const char* base = slash ? slash + 1 : src;
-        char* dot = strrchr(base, '.');
-        size_t len = dot ? (size_t)(dot - base) : strlen(base);
-        unsigned h = cbuild__hash_path(src);
         char objname[512];
-        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
-
         char depname[512];
-        snprintf(depname, sizeof(depname), "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+        cbuild__object_paths(t, src, objname, depname, sizeof(objname));
 
-        if (need_recompile(ctx, src, objname, depname, t)) {
-            cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "%s", src);
-            if (compile_source(ctx, src, objname, depname, t) != 0) {
-                EnterCriticalSection(&ctx->queue_mutex);
-                ctx->build_error = 1;
-                LeaveCriticalSection(&ctx->queue_mutex);
-                break;
-            }
+        if (compile_source(ctx, src, objname, depname, t) != 0) {
             EnterCriticalSection(&ctx->queue_mutex);
-            ctx->compiled_count++;
+            ctx->build_error = 1;
             LeaveCriticalSection(&ctx->queue_mutex);
+            break;
         }
+        EnterCriticalSection(&ctx->queue_mutex);
+        ctx->compiled_count++;
+        LeaveCriticalSection(&ctx->queue_mutex);
     }
     return 0;
 }
@@ -438,36 +439,24 @@ static void* compile_worker(void* arg) {
 
         int job_index = ctx->jobs_completed++;
         compile_job_t job = ctx->job_queue[job_index];
+        target_t* t = job.target;
+        const char* src = t->sources[job.source_index];
+        cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "[%d/%d] %s", job_index + 1, ctx->job_count, src);
         pthread_mutex_unlock(&ctx->queue_mutex);
 
-        target_t* t = job.target;
-        int i = job.source_index;
-        const char* src = t->sources[i];
-        const char* slash = strrchr(src, '/');
-        const char* bslash = strrchr(src, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
-        const char* base = slash ? slash + 1 : src;
-        char* dot = strrchr(base, '.');
-        size_t len = dot ? (size_t)(dot - base) : strlen(base);
-        unsigned h = cbuild__hash_path(src);
         char objname[512];
-        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
-
         char depname[512];
-        snprintf(depname, sizeof(depname), "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+        cbuild__object_paths(t, src, objname, depname, sizeof(objname));
 
-        if (need_recompile(ctx, src, objname, depname, t)) {
-            cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "%s", src);
-            if (compile_source(ctx, src, objname, depname, t) != 0) {
-                pthread_mutex_lock(&ctx->queue_mutex);
-                ctx->build_error = 1;
-                pthread_mutex_unlock(&ctx->queue_mutex);
-                break;
-            }
+        if (compile_source(ctx, src, objname, depname, t) != 0) {
             pthread_mutex_lock(&ctx->queue_mutex);
-            ctx->compiled_count++;
+            ctx->build_error = 1;
             pthread_mutex_unlock(&ctx->queue_mutex);
+            break;
         }
+        pthread_mutex_lock(&ctx->queue_mutex);
+        ctx->compiled_count++;
+        pthread_mutex_unlock(&ctx->queue_mutex);
     }
     return NULL;
 }
@@ -481,7 +470,10 @@ CBUILD_INTERNAL int process_compile_jobs_parallel(cbuild_context_t* ctx, target_
     ctx->build_error = 0;
 
     for (int i = 0; i < target->sources_count; ++i) {
-        enqueue_compile_job(ctx, target, i);
+        char objname[512];
+        char depname[512];
+        cbuild__object_paths(target, target->sources[i], objname, depname, sizeof(objname));
+        if (need_recompile(ctx, target->sources[i], objname, depname, target)) enqueue_compile_job(ctx, target, i);
     }
 
     if (ctx->job_count == 0) return 0;

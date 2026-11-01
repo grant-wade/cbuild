@@ -10,9 +10,18 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - `cbuild_spawn` runs a program without a shell, optionally capturing its output, for use in callbacks and build programs.
 - `cbuild_get_flag_value` reads a flag's value from argv before the graph is defined, like `cbuild_has_flag` for flags that take values.
 - `tests/run-test-runner.py` tests the test framework on every platform.
+- `example/` registers tests for its library and executable with `cbuild_add_test`.
+- Output has section headers for its setup, build, test, run, and clean phases, logged at the new `CBUILD_LOG_SECTION` level.
+- Subproject builds and cleans run with `CBUILD_NESTED` set, print nothing when they have no work, and leave the end-of-build status to their parent.
+- Builds end with `Up to date.` or `Build succeeded (...)` with counts and elapsed time, subprojects included.
+- `COMPILE` steps show `[n/total]` for each target.
+- `PASS`, `FAIL`, and `SKIP` are green, red, and yellow, and step labels use their own colors.
+- Color is used only on terminals, including Windows consoles that support it, and follows `NO_COLOR` and `CLICOLOR_FORCE`.
 
 ### Fixed
 
+- Subproject manifests ignore output lines that are not targets.
+- `--manifest` and `--list` printed `(null)/...` paths when the output directory was left at its default, and outdated paths when it was set after the target was created.
 - Recursive wildcards work: `src/**/*.c` matches `.c` files in `src/` and every directory below it, and wildcards in directory names (`src/*/impl.c`) match too. Previously any pattern with a wildcard before its last `/` matched nothing.
 - Wildcard matches are returned in sorted order, so source and link order no longer depend on the order the filesystem lists directories in.
 - Executables and shared libraries link their dependency libraries before system libraries (`-lm` and friends), so single-pass linkers such as GNU ld with `--as-needed` resolve references from static libraries to system libraries.

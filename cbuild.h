@@ -221,7 +221,8 @@ typedef enum {
     CBUILD_LOG_STEP,
     CBUILD_LOG_STATUS_OK,
     CBUILD_LOG_STATUS_FAIL,
-    CBUILD_LOG_VERBOSE
+    CBUILD_LOG_VERBOSE,
+    CBUILD_LOG_SECTION
 } cbuild_log_level_t;
 
 typedef void (*cbuild_log_fn)(void* user_data, cbuild_log_level_t level, const char* msg);
@@ -522,6 +523,7 @@ int cbuild_expand_wildcard_recursive(const char* dir_path, const char* pattern,
 #define strcasecmp _stricmp
 #define strdup _strdup
 #define isatty _isatty
+#define fileno _fileno
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -556,7 +558,6 @@ extern char** environ; /* for posix_spawnp */
 
 #define CBUILD_EXE_SUFFIX ".exe"
 
-#ifndef _WIN32
 #define CBUILD_COLOR_RESET "\033[0m"
 #define CBUILD_COLOR_BOLD "\033[1m"
 #define CBUILD_COLOR_GREEN "\033[32m"
@@ -564,15 +565,10 @@ extern char** environ; /* for posix_spawnp */
 #define CBUILD_COLOR_BLUE "\033[34m"
 #define CBUILD_COLOR_MAGENTA "\033[35m"
 #define CBUILD_COLOR_RED "\033[31m"
+
+#ifndef _WIN32
 #define CBUILD_OBJ_EXT ".o"
 #else
-#define CBUILD_COLOR_RESET ""
-#define CBUILD_COLOR_BOLD ""
-#define CBUILD_COLOR_GREEN ""
-#define CBUILD_COLOR_YELLOW ""
-#define CBUILD_COLOR_BLUE ""
-#define CBUILD_COLOR_MAGENTA ""
-#define CBUILD_COLOR_RED ""
 #define CBUILD_OBJ_EXT ".obj"
 #endif
 
@@ -692,6 +688,12 @@ struct cbuild_context {
     int global_ldflag_count;
     int global_ldflag_cap;
     int verbose;
+    int section_started;
+    int nested_announced;
+    int build_compiled;
+    int build_linked;
+    int build_commands;
+    double build_started;
     char** target_filters;
     int target_filter_count;
     int target_filter_cap;
@@ -797,6 +799,7 @@ struct cbuild_command {
     int executed;
     int in_progress;  // set while running, to detect dependency cycles
     int result;
+    subproject_t* subproject;  // the subproject this command builds, if any
 };
 
 struct cbuild_config {
@@ -945,7 +948,26 @@ CBUILD_INTERNAL void cbuild__clean_dir(cbuild_context_t* ctx, const char* path);
 CBUILD_INTERNAL void cbuild__log(cbuild_context_t* ctx, cbuild_log_level_t level, const char* fmt, ...);
 CBUILD_INTERNAL void cbuild__log_step(cbuild_context_t* ctx, const char* label, const char* color, const char* fmt, ...);
 CBUILD_INTERNAL void cbuild__log_status(cbuild_context_t* ctx, int ok, const char* fmt, ...);
+CBUILD_INTERNAL void cbuild__log_section(cbuild_context_t* ctx, const char* fmt, ...);
 CBUILD_INTERNAL void cbuild__set_error(cbuild_context_t* ctx, const char* fmt, ...);
+CBUILD_INTERNAL int cbuild__is_nested(void);
+
+/* build.c */
+CBUILD_INTERNAL void cbuild__build_begin(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__build_succeeded(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__build_failed(cbuild_context_t* ctx, const char* message);
+
+/* test.c */
+CBUILD_INTERNAL double cbuild__now_seconds(void);
+
+/* subproject.c */
+/* Returns a malloc'd shell command running exe with args in directory. */
+CBUILD_INTERNAL char* cbuild__subproject_command_line(const char* directory, const char* alias, const char* exe,
+                                                      const char* args);
+CBUILD_INTERNAL void cbuild__write_nested_report(cbuild_context_t* ctx, int failed);
+CBUILD_INTERNAL void cbuild__forget_subproject_report(subproject_t* sub);
+/* Adds the subproject's reported work to ctx; returns nonzero if it reported a failed build. */
+CBUILD_INTERNAL int cbuild__collect_subproject_report(cbuild_context_t* ctx, subproject_t* sub);
 
 /* process.c */
 CBUILD_INTERNAL void cbuild_argv_init(cbuild_argv_t* argv);
@@ -991,6 +1013,43 @@ CBUILD_INTERNAL void fprint_json_string(FILE* f, const char* s);
 
 
 static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag);
+
+CBUILD_INTERNAL void cbuild__build_begin(cbuild_context_t* ctx) {
+    cbuild__log_section(ctx, "Build");
+    ctx->build_compiled = 0;
+    ctx->build_linked = 0;
+    ctx->build_commands = 0;
+    ctx->build_started = cbuild__now_seconds();
+}
+
+CBUILD_INTERNAL void cbuild__build_succeeded(cbuild_context_t* ctx) {
+    int worked = ctx->build_compiled || ctx->build_linked || ctx->build_commands;
+    if (cbuild__is_nested()) {
+        if (worked) cbuild__write_nested_report(ctx, 0);
+        return;
+    }
+    if (!worked) {
+        cbuild__log_status(ctx, 1, "Up to date.");
+        return;
+    }
+    char* counts = NULL;
+    if (ctx->build_compiled) append_format(&counts, "%d compiled, ", ctx->build_compiled);
+    if (ctx->build_linked) append_format(&counts, "%d linked, ", ctx->build_linked);
+    if (ctx->build_commands) {
+        append_format(&counts, "%d command%s, ", ctx->build_commands, ctx->build_commands == 1 ? "" : "s");
+    }
+    cbuild__log_status(ctx, 1, "Build succeeded (%s%.1fs).", counts ? counts : "",
+                       cbuild__now_seconds() - ctx->build_started);
+    free(counts);
+}
+
+CBUILD_INTERNAL void cbuild__build_failed(cbuild_context_t* ctx, const char* message) {
+    if (cbuild__is_nested()) {
+        cbuild__write_nested_report(ctx, 1);
+        return;
+    }
+    cbuild__log_status(ctx, 0, "%s", message);
+}
 
 static void dfs_command_func(cbuild_context_t* ctx, command_t* cmd, int* error_flag_ptr) {
     if (!cmd || *error_flag_ptr)
@@ -1139,22 +1198,15 @@ int cbuild_clean(cbuild_context_t* ctx) {
     cbuild_init(ctx);
     cbuild__resolve_target_paths(ctx);
 
-    cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
+    cbuild__log_section(ctx, "Clean");
+    int nested = cbuild__is_nested();
+    if (!nested) cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
     for (int i = 0; i < ctx->subproject_count; ++i) {
         subproject_t* sub = ctx->subprojects[i];
-        cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
-        char old_cwd[PATH_MAX];
-        if (cbuild_get_cwd(old_cwd, sizeof(old_cwd)) == 0) {
-            if (chdir(sub->directory) == 0) {
-                cbuild_argv_t avv;
-                cbuild_argv_init(&avv);
-                cbuild_argv_append(&avv, sub->cbuild_exe);
-                cbuild_argv_append(&avv, "--clean");
-                (void)cbuild_spawn_process(ctx, &avv, 0, NULL);
-                cbuild_argv_free(&avv);
-                chdir(old_cwd);
-            }
-        }
+        if (!nested) cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
+        char* cmdline = cbuild__subproject_command_line(sub->directory, sub->alias, sub->cbuild_exe, "--clean");
+        (void)run_command(ctx, cmdline, 0, NULL);
+        free(cmdline);
     }
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
@@ -1219,6 +1271,7 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
     ctx->visited = calloc(ctx->target_count, sizeof(int));
     ctx->in_stack = calloc(ctx->target_count, sizeof(int));
 
+    cbuild__build_begin(ctx);
     if (target_name) {
         target_t* target_to_build = NULL;
         for (int i = 0; i < ctx->target_count; ++i) {
@@ -1293,10 +1346,10 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
                 fclose(f);
             }
         }
-        cbuild__log_status(ctx, 1, "Build succeeded.");
+        cbuild__build_succeeded(ctx);
         return 0;
     } else {
-        cbuild__log_status(ctx, 0, "Build failed.");
+        cbuild__build_failed(ctx, "Build failed.");
         return -1;
     }
 }
@@ -1503,6 +1556,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
     }
 
     int compiled_sources = process_compile_jobs_parallel(ctx, t, error_flag);
+    ctx->build_compiled += compiled_sources;
     if (*error_flag) return;
 
     int obj_count = t->sources_count;
@@ -1622,6 +1676,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
             *error_flag = 1;
         } else {
             t->rebuilt = 1;
+            ctx->build_linked++;
             /* On successful link, write signature of the link command */
             FILE* lf = fopen(link_sig_path, "wb");
             if (lf) {
@@ -1673,6 +1728,7 @@ static int cbuild__flag_on_compile_commands(const char* v, void* u) {
 static int cbuild__flag_on_list(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild__resolve_target_paths(ctx);
     cbuild__log(ctx, CBUILD_LOG_INFO, "Available targets:");
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
@@ -1756,6 +1812,7 @@ static int cbuild__flag_on_graph(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
 
+    cbuild__resolve_target_paths(ctx);
     cbuild__log(ctx, CBUILD_LOG_INFO, "Build graph:");
     if (ctx->target_count == 0) {
         cbuild__log(ctx, CBUILD_LOG_INFO, "  (no targets)");
@@ -1855,6 +1912,7 @@ static int cbuild__flag_on_deps(const char* v, void* u) {
         cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: target '%s' not found", v);
         return 1;
     }
+    cbuild__resolve_target_paths(ctx);
     target_t* root = ctx->targets[idx];
     const char* name = root->name ? root->name : (root->output_file ? root->output_file : "(unnamed)");
     cbuild__log(ctx, CBUILD_LOG_INFO, "%s [%s]", name, cbuild__type_str(root->type));
@@ -1869,6 +1927,7 @@ static int cbuild__flag_on_deps(const char* v, void* u) {
 static int cbuild__flag_on_manifest(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild__resolve_target_paths(ctx);
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
         if (!t->output_file || !t->name) continue;
@@ -2107,6 +2166,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
             return rc;
         }
 
+        if (match->target) cbuild__build_begin(ctx);
         dfs_build_func(ctx, match->target, &error_flag);
 
         free(ctx->visited);
@@ -2115,11 +2175,13 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
         ctx->in_stack = NULL;
 
         if (error_flag) {
-            cbuild__log_status(ctx, 0, "Build failed.");
+            cbuild__build_failed(ctx, "Build failed.");
             return 1;
         }
+        if (match->target) cbuild__build_succeeded(ctx);
 
         int sub_rc = 0;
+        cbuild__log_section(ctx, "Run: %s", match->name);
         if (match->command_line) {
             cbuild__log_step(ctx, "SUBCMD", CBUILD_COLOR_BLUE, "Running '%s': %s", match->name, match->command_line);
             sub_rc = run_command(ctx, match->command_line, 0, NULL);
@@ -2185,6 +2247,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
         }
     }
 
+    cbuild__build_begin(ctx);
     if (ctx->target_filter_count > 0) {
         for (int f = 0; f < ctx->target_filter_count; ++f) {
             target_t* target_to_build = NULL;
@@ -2263,10 +2326,10 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
                 fclose(f);
             }
         }
-        cbuild__log_status(ctx, 1, "Build succeeded.");
+        cbuild__build_succeeded(ctx);
         return 0;
     } else {
-        cbuild__log_status(ctx, 0, "Build failed.");
+        cbuild__build_failed(ctx, "Build failed.");
         return 1;
     }
 }
@@ -2353,7 +2416,12 @@ int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
         }
     }
 
-    cbuild__log_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
+    if (cmd->subproject) {
+        cbuild__forget_subproject_report(cmd->subproject);
+    } else {
+        cbuild__log_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, "%s", cmd->name);
+        ctx->build_commands++;
+    }
 
     int rc = 0;
 
@@ -2381,7 +2449,8 @@ int cbuild_run_command(cbuild_context_t* ctx, command_t* cmd) {
     cmd->in_progress = 0;
     cmd->result = rc;
 
-    if (rc != 0) {
+    int failure_reported = cmd->subproject && cbuild__collect_subproject_report(ctx, cmd->subproject);
+    if (rc != 0 && !failure_reported) {
         cbuild__log_status(ctx, 0, "Command failed: %s", cmd->name);
     }
 
@@ -2803,6 +2872,19 @@ static void enqueue_compile_job(cbuild_context_t* ctx, target_t* target, int sou
     ctx->job_count++;
 }
 
+/* Fills obj and dep, each of size bytes, with the paths for the source's object and dependency files. */
+static void cbuild__object_paths(target_t* t, const char* src, char* obj, char* dep, size_t size) {
+    const char* slash = strrchr(src, '/');
+    const char* bslash = strrchr(src, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    const char* base = slash ? slash + 1 : src;
+    const char* dot = strrchr(base, '.');
+    size_t len = dot ? (size_t)(dot - base) : strlen(base);
+    unsigned h = cbuild__hash_path(src);
+    snprintf(obj, size, "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
+    snprintf(dep, size, "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+}
+
 #ifdef _WIN32
 
 static DWORD WINAPI compile_worker(void* arg) {
@@ -2817,36 +2899,24 @@ static DWORD WINAPI compile_worker(void* arg) {
 
         int job_index = ctx->jobs_completed++;
         compile_job_t job = ctx->job_queue[job_index];
+        target_t* t = job.target;
+        const char* src = t->sources[job.source_index];
+        cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "[%d/%d] %s", job_index + 1, ctx->job_count, src);
         LeaveCriticalSection(&ctx->queue_mutex);
 
-        target_t* t = job.target;
-        int i = job.source_index;
-        const char* src = t->sources[i];
-        const char* slash = strrchr(src, '/');
-        const char* bslash = strrchr(src, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
-        const char* base = slash ? slash + 1 : src;
-        char* dot = strrchr(base, '.');
-        size_t len = dot ? (size_t)(dot - base) : strlen(base);
-        unsigned h = cbuild__hash_path(src);
         char objname[512];
-        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
-
         char depname[512];
-        snprintf(depname, sizeof(depname), "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+        cbuild__object_paths(t, src, objname, depname, sizeof(objname));
 
-        if (need_recompile(ctx, src, objname, depname, t)) {
-            cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "%s", src);
-            if (compile_source(ctx, src, objname, depname, t) != 0) {
-                EnterCriticalSection(&ctx->queue_mutex);
-                ctx->build_error = 1;
-                LeaveCriticalSection(&ctx->queue_mutex);
-                break;
-            }
+        if (compile_source(ctx, src, objname, depname, t) != 0) {
             EnterCriticalSection(&ctx->queue_mutex);
-            ctx->compiled_count++;
+            ctx->build_error = 1;
             LeaveCriticalSection(&ctx->queue_mutex);
+            break;
         }
+        EnterCriticalSection(&ctx->queue_mutex);
+        ctx->compiled_count++;
+        LeaveCriticalSection(&ctx->queue_mutex);
     }
     return 0;
 }
@@ -2865,36 +2935,24 @@ static void* compile_worker(void* arg) {
 
         int job_index = ctx->jobs_completed++;
         compile_job_t job = ctx->job_queue[job_index];
+        target_t* t = job.target;
+        const char* src = t->sources[job.source_index];
+        cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "[%d/%d] %s", job_index + 1, ctx->job_count, src);
         pthread_mutex_unlock(&ctx->queue_mutex);
 
-        target_t* t = job.target;
-        int i = job.source_index;
-        const char* src = t->sources[i];
-        const char* slash = strrchr(src, '/');
-        const char* bslash = strrchr(src, '\\');
-        if (bslash && (!slash || bslash > slash)) slash = bslash;
-        const char* base = slash ? slash + 1 : src;
-        char* dot = strrchr(base, '.');
-        size_t len = dot ? (size_t)(dot - base) : strlen(base);
-        unsigned h = cbuild__hash_path(src);
         char objname[512];
-        snprintf(objname, sizeof(objname), "%s/%.*s-%08x" CBUILD_OBJ_EXT, t->obj_dir, (int)len, base, h);
-
         char depname[512];
-        snprintf(depname, sizeof(depname), "%s/%.*s-%08x" CBUILD_OBJ_EXT ".d", t->obj_dir, (int)len, base, h);
+        cbuild__object_paths(t, src, objname, depname, sizeof(objname));
 
-        if (need_recompile(ctx, src, objname, depname, t)) {
-            cbuild__log_step(ctx, "COMPILE", CBUILD_COLOR_BLUE, "%s", src);
-            if (compile_source(ctx, src, objname, depname, t) != 0) {
-                pthread_mutex_lock(&ctx->queue_mutex);
-                ctx->build_error = 1;
-                pthread_mutex_unlock(&ctx->queue_mutex);
-                break;
-            }
+        if (compile_source(ctx, src, objname, depname, t) != 0) {
             pthread_mutex_lock(&ctx->queue_mutex);
-            ctx->compiled_count++;
+            ctx->build_error = 1;
             pthread_mutex_unlock(&ctx->queue_mutex);
+            break;
         }
+        pthread_mutex_lock(&ctx->queue_mutex);
+        ctx->compiled_count++;
+        pthread_mutex_unlock(&ctx->queue_mutex);
     }
     return NULL;
 }
@@ -2908,7 +2966,10 @@ CBUILD_INTERNAL int process_compile_jobs_parallel(cbuild_context_t* ctx, target_
     ctx->build_error = 0;
 
     for (int i = 0; i < target->sources_count; ++i) {
-        enqueue_compile_job(ctx, target, i);
+        char objname[512];
+        char depname[512];
+        cbuild__object_paths(target, target->sources[i], objname, depname, sizeof(objname));
+        if (need_recompile(ctx, target->sources[i], objname, depname, target)) enqueue_compile_job(ctx, target, i);
     }
 
     if (ctx->job_count == 0) return 0;
@@ -5045,40 +5106,85 @@ static void remove_dir_recursive(cbuild_context_t* ctx, const char* path) {
 /* log.c - logging and error reporting. */
 
 
-static void cbuild__default_logger(void* user_data, cbuild_log_level_t level, const char* msg) {
-    (void)user_data;
+#define CBUILD_SECTION_RULE "\xe2\x94\x80"
+
+#if defined(_WIN32) && !defined(ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+
+enum { CBUILD_SECTION_WIDTH = 48 };
+
+CBUILD_INTERNAL int cbuild__is_nested(void) {
+    const char* nested = getenv("CBUILD_NESTED");
+    return nested && *nested;
+}
+
+static int cbuild__use_color(FILE* out) {
+    const char* no_color = getenv("NO_COLOR");
+    if (no_color && *no_color) return 0;
+    const char* force = getenv("CLICOLOR_FORCE");
+    if (force && *force && strcmp(force, "0") != 0) return 1;
+    int fd = fileno(out);
+    if (!isatty(fd)) return 0;
+#ifdef _WIN32
+    HANDLE handle = (HANDLE)_get_osfhandle(fd);
+    DWORD mode = 0;
+    if (!GetConsoleMode(handle, &mode)) return 0;
+    if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) return 1;
+    return SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+#else
+    const char* term = getenv("TERM");
+    return !term || strcmp(term, "dumb") != 0;
+#endif
+}
+
+/* step_color applies only to CBUILD_LOG_STEP messages. */
+static void cbuild__print_log(cbuild_log_level_t level, const char* msg, const char* step_color) {
     FILE* out = (level == CBUILD_LOG_ERROR || level == CBUILD_LOG_WARNING || level == CBUILD_LOG_STATUS_FAIL) ? stderr : stdout;
+    int color = cbuild__use_color(out);
+    const char* reset = color ? CBUILD_COLOR_RESET : "";
     switch (level) {
         case CBUILD_LOG_INFO:
             fprintf(out, "%s\n", msg);
             break;
         case CBUILD_LOG_WARNING:
-            fprintf(out, "%sWarning:%s %s\n", CBUILD_COLOR_YELLOW, CBUILD_COLOR_RESET, msg);
+            fprintf(out, "%sWarning:%s %s\n", color ? CBUILD_COLOR_YELLOW : "", reset, msg);
             break;
         case CBUILD_LOG_ERROR:
-            fprintf(out, "%sError:%s %s\n", CBUILD_COLOR_RED, CBUILD_COLOR_RESET, msg);
+            fprintf(out, "%sError:%s %s\n", color ? CBUILD_COLOR_RED : "", reset, msg);
             break;
         case CBUILD_LOG_STEP: {
+            const char* paint = color ? step_color : "";
             const char* space = strchr(msg, ' ');
             if (space) {
                 int label_len = (int)(space - msg);
-                fprintf(out, "%s%-10.*s%s %s\n", CBUILD_COLOR_BLUE, label_len, msg, CBUILD_COLOR_RESET, space + 1);
+                fprintf(out, "%s%-10.*s%s %s\n", paint, label_len, msg, reset, space + 1);
             } else {
-                fprintf(out, "%s%-10s%s\n", CBUILD_COLOR_BLUE, msg, CBUILD_COLOR_RESET);
+                fprintf(out, "%s%-10s%s\n", paint, msg, reset);
             }
             break;
         }
         case CBUILD_LOG_STATUS_OK:
-            fprintf(out, "%s%s%s %s\n", CBUILD_COLOR_GREEN, "✔", CBUILD_COLOR_RESET, msg);
+            fprintf(out, "%s%s%s %s\n", color ? CBUILD_COLOR_GREEN : "", "✔", reset, msg);
             break;
         case CBUILD_LOG_STATUS_FAIL:
-            fprintf(out, "%s%s%s %s\n", CBUILD_COLOR_RED, "✖", CBUILD_COLOR_RESET, msg);
+            fprintf(out, "%s%s%s %s\n", color ? CBUILD_COLOR_RED : "", "✖", reset, msg);
             break;
         case CBUILD_LOG_VERBOSE:
             fprintf(out, "%s\n", msg);
             break;
+        case CBUILD_LOG_SECTION:
+            fprintf(out, "%s" CBUILD_SECTION_RULE CBUILD_SECTION_RULE " %s ", color ? CBUILD_COLOR_BOLD : "", msg);
+            for (int i = (int)strlen(msg) + 4; i < CBUILD_SECTION_WIDTH; ++i) fputs(CBUILD_SECTION_RULE, out);
+            fprintf(out, "%s\n", reset);
+            break;
     }
     fflush(out);
+}
+
+static void cbuild__default_logger(void* user_data, cbuild_log_level_t level, const char* msg) {
+    (void)user_data;
+    cbuild__print_log(level, msg, CBUILD_COLOR_BLUE);
 }
 
 CBUILD_INTERNAL void cbuild__log(cbuild_context_t* ctx, cbuild_log_level_t level, const char* fmt, ...) {
@@ -5091,22 +5197,37 @@ CBUILD_INTERNAL void cbuild__log(cbuild_context_t* ctx, cbuild_log_level_t level
     fn(ctx->log_user_data, level, buf);
 }
 
-CBUILD_INTERNAL void cbuild__log_step(cbuild_context_t* ctx, const char* label, const char* color, const char* fmt, ...) {
-    (void)color;
-    char buf[2048];
+static void cbuild__emit_step(cbuild_context_t* ctx, const char* label, const char* color, const char* text) {
     char msg[2048];
+    snprintf(msg, sizeof(msg), "%s ", label);
+    size_t used = strlen(msg);
+    strncat(msg, text, sizeof(msg) - used - 1);
+    if (ctx->log_fn) {
+        ctx->log_fn(ctx->log_user_data, CBUILD_LOG_STEP, msg);
+    } else {
+        cbuild__print_log(CBUILD_LOG_STEP, msg, color);
+    }
+}
+
+CBUILD_INTERNAL void cbuild__log_step(cbuild_context_t* ctx, const char* label, const char* color, const char* fmt, ...) {
+    if (!cbuild__is_nested()) {
+        if (!ctx->section_started) cbuild__log_section(ctx, "Setup");
+    } else if (!ctx->nested_announced) {
+        ctx->nested_announced = 1;
+        char announcement[512];
+        snprintf(announcement, sizeof(announcement), "build subproject %s", getenv("CBUILD_NESTED"));
+        cbuild__emit_step(ctx, "COMMAND", CBUILD_COLOR_MAGENTA, announcement);
+    }
+    char buf[2048];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    snprintf(msg, sizeof(msg), "%s ", label);
-    size_t used = strlen(msg);
-    strncat(msg, buf, sizeof(msg) - used - 1);
-    cbuild_log_fn fn = ctx->log_fn ? ctx->log_fn : cbuild__default_logger;
-    fn(ctx->log_user_data, CBUILD_LOG_STEP, msg);
+    cbuild__emit_step(ctx, label, color, buf);
 }
 
 CBUILD_INTERNAL void cbuild__log_status(cbuild_context_t* ctx, int ok, const char* fmt, ...) {
+    if (ok && cbuild__is_nested()) return;
     char buf[2048];
     va_list args;
     va_start(args, fmt);
@@ -5114,6 +5235,19 @@ CBUILD_INTERNAL void cbuild__log_status(cbuild_context_t* ctx, int ok, const cha
     va_end(args);
     cbuild_log_fn fn = ctx->log_fn ? ctx->log_fn : cbuild__default_logger;
     fn(ctx->log_user_data, ok ? CBUILD_LOG_STATUS_OK : CBUILD_LOG_STATUS_FAIL, buf);
+}
+
+CBUILD_INTERNAL void cbuild__log_section(cbuild_context_t* ctx, const char* fmt, ...) {
+    if (cbuild__is_nested()) return;
+    char buf[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (ctx->section_started && !ctx->log_fn) fputc('\n', stdout);
+    ctx->section_started = 1;
+    cbuild_log_fn fn = ctx->log_fn ? ctx->log_fn : cbuild__default_logger;
+    fn(ctx->log_user_data, CBUILD_LOG_SECTION, buf);
 }
 
 void cbuild_set_logger(cbuild_context_t* ctx, cbuild_log_fn callback, void* user_data) {
@@ -5762,6 +5896,8 @@ int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, 
 /* subproject.c - subproject manifests and imported targets. */
 
 
+#define CBUILD_NESTED_REPORT ".cbuild-nested-report"
+
 static void cbuild__parse_manifest(cbuild_context_t* ctx, subproject_t* sub) {
     if (sub->manifest_loaded)
         return;
@@ -5813,7 +5949,8 @@ static void cbuild__parse_manifest(cbuild_context_t* ctx, subproject_t* sub) {
         char* name = strtok(NULL, " \t");
         char* path = strtok(NULL, "\r\n");
 
-        if (type && name && path) {
+        if (type && name && path &&
+            (strcmp(type, "static_lib") == 0 || strcmp(type, "shared_lib") == 0 || strcmp(type, "executable") == 0)) {
             cbuild__trim(path);
             if (sub->target_count + 1 > sub->target_cap) {
                 sub->target_cap = sub->target_cap ? sub->target_cap * 2 : 4;
@@ -5846,6 +5983,57 @@ cbuild__find_subproject_target(subproject_t* sub, const char* tgt_name) {
     return NULL;
 }
 
+CBUILD_INTERNAL char* cbuild__subproject_command_line(const char* directory, const char* alias, const char* exe,
+                                                      const char* args) {
+    char* cmdline = NULL;
+#ifdef _WIN32
+    /* Shell commands use PowerShell on Windows. */
+    append_format(&cmdline, "Set-Location -LiteralPath '%s'; $env:CBUILD_NESTED='%s'; & '%s' %s", directory, alias, exe, args);
+#else
+    append_format(&cmdline, "cd '%s' && CBUILD_NESTED='%s' '%s' %s", directory, alias, exe, args);
+#endif
+    return cmdline;
+}
+
+CBUILD_INTERNAL void cbuild__write_nested_report(cbuild_context_t* ctx, int failed) {
+    FILE* report = fopen(CBUILD_NESTED_REPORT, "w");
+    if (!report) return;
+    fprintf(report, "%d %d %d %d\n", ctx->build_compiled, ctx->build_linked, ctx->build_commands, failed);
+    fclose(report);
+}
+
+static char* cbuild__subproject_report_path(subproject_t* sub) {
+    char* path = NULL;
+    append_format(&path, "%s/" CBUILD_NESTED_REPORT, sub->directory);
+    return path;
+}
+
+CBUILD_INTERNAL void cbuild__forget_subproject_report(subproject_t* sub) {
+    char* path = cbuild__subproject_report_path(sub);
+    if (path) remove(path);
+    free(path);
+}
+
+CBUILD_INTERNAL int cbuild__collect_subproject_report(cbuild_context_t* ctx, subproject_t* sub) {
+    char* path = cbuild__subproject_report_path(sub);
+    if (!path) return 0;
+    int compiled = 0, linked = 0, commands = 0, failed = 0;
+    FILE* report = fopen(path, "r");
+    if (report) {
+        if (fscanf(report, "%d %d %d %d", &compiled, &linked, &commands, &failed) == 4) {
+            ctx->build_compiled += compiled;
+            ctx->build_linked += linked;
+            ctx->build_commands += commands;
+        } else {
+            failed = 0;
+        }
+        fclose(report);
+        remove(path);
+    }
+    free(path);
+    return failed;
+}
+
 subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, const char* directory,
                                     const char* cbuild_exe) {
     subproject_t* sub = (subproject_t*)calloc(1, sizeof(subproject_t));
@@ -5853,17 +6041,12 @@ subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, co
     sub->directory = strdup(directory);
     sub->cbuild_exe = strdup(cbuild_exe);
 
-    char* cmdline = NULL;
-#ifdef _WIN32
-    /* Shell commands use PowerShell on Windows. */
-    append_format(&cmdline, "Set-Location -LiteralPath '%s'; & '%s'", directory, cbuild_exe);
-#else
-    append_format(&cmdline, "cd '%s' && '%s'", directory, cbuild_exe);
-#endif
+    char* cmdline = cbuild__subproject_command_line(directory, alias, cbuild_exe, "");
     char build_cmd_name[256];
     snprintf(build_cmd_name, sizeof(build_cmd_name), "build subproject %s",
              alias);
     sub->build_cmd = cbuild_command(ctx, build_cmd_name, cmdline);
+    if (sub->build_cmd) sub->build_cmd->subproject = sub;
     free(cmdline);
 
     if (ctx->subproject_count + 1 > ctx->subproject_cap) {
@@ -6578,7 +6761,7 @@ CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx) {
     if (shown == 0) cbuild__log(ctx, CBUILD_LOG_INFO, "  (no tests)");
 }
 
-static double cbuild__now_seconds(void) {
+CBUILD_INTERNAL double cbuild__now_seconds(void) {
 #ifdef _WIN32
     return (double)GetTickCount64() / 1000.0;
 #else
@@ -6802,7 +6985,10 @@ static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
     if (result == CBUILD_TEST_FAIL) run->failed++;
     if (result == CBUILD_TEST_SKIP) run->skipped++;
     const char* label = result == CBUILD_TEST_PASS ? "PASS" : result == CBUILD_TEST_SKIP ? "SKIP" : "FAIL";
-    cbuild__log_step(ctx, label, CBUILD_COLOR_BLUE, "[%d/%d] %s (%.2fs%s)", run->finished, run->count,
+    const char* color = result == CBUILD_TEST_PASS   ? CBUILD_COLOR_GREEN
+                        : result == CBUILD_TEST_SKIP ? CBUILD_COLOR_YELLOW
+                                                     : CBUILD_COLOR_RED;
+    cbuild__log_step(ctx, label, color, "[%d/%d] %s (%.2fs%s)", run->finished, run->count,
                      test->name, elapsed, detail);
     if (result == CBUILD_TEST_FAIL) {
         char* text = cbuild__read_text_file(log_path);
@@ -6879,6 +7065,7 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
         return 0;
     }
 
+    cbuild__build_begin(ctx);
     int error_flag = 0;
     free(ctx->visited);
     free(ctx->in_stack);
@@ -6895,10 +7082,11 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     free(ctx->in_stack);
     ctx->in_stack = NULL;
     if (error_flag) {
-        cbuild__log_status(ctx, 0, "Build failed; tests not run.");
+        cbuild__build_failed(ctx, "Build failed; tests not run.");
         free(run.tests);
         return -1;
     }
+    cbuild__build_succeeded(ctx);
 
     const char* output_dir = ctx->active_config && ctx->active_config->output_dir
                                  ? ctx->active_config->output_dir
@@ -6915,8 +7103,8 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     if (thread_count > MAXIMUM_WAIT_OBJECTS) thread_count = MAXIMUM_WAIT_OBJECTS;
 #endif
 
-    cbuild__log_step(ctx, "TEST", CBUILD_COLOR_BLUE, "Running %d test%s with %d job%s", run.count,
-                     run.count == 1 ? "" : "s", thread_count, thread_count == 1 ? "" : "s");
+    cbuild__log_section(ctx, "Test: %d test%s, %d job%s", run.count, run.count == 1 ? "" : "s", thread_count,
+                        thread_count == 1 ? "" : "s");
     double start = cbuild__now_seconds();
 
 #ifdef _WIN32

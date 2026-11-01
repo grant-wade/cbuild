@@ -205,7 +205,7 @@ Errors come back through `cbuild_get_last_error`, and `cbuild_set_logger` sends 
 ## Going deeper
 
 - [`docs/api.md`](docs/api.md) is the full API reference.
-- [`example/`](example/) is a small project that links against a subproject.
+- [`example/`](example/) is a small project that links against a subproject and tests it with `./cbuild --test`.
 - [`tests/`](tests/) explains the test suite and how to run it.
 - [`CHANGELOG.md`](CHANGELOG.md) has what changed in each version.
 

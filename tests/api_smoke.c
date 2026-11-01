@@ -103,6 +103,27 @@ static int run_child(int argc, char **args) {
     return atoi(args[0]);
 }
 
+static void capture_sections(void *user_data, cbuild_log_level_t level,
+                             const char *message) {
+    if (level == CBUILD_LOG_SECTION) capture_log(user_data, level, message);
+    assert(message[0] != '\0');
+}
+
+static void test_sections(void) {
+    cbuild_context_t *ctx = cbuild_context_new();
+    assert(ctx != NULL);
+    listing_t log = { { 0 }, 0 };
+    cbuild_set_logger(ctx, capture_sections, &log);
+    cbuild_set_output_dir(ctx, "tests/api-build");
+    assert(cbuild_dummy_target(ctx, "section_target") != NULL);
+
+    assert(cbuild_build(ctx, NULL) == 0);
+    assert(cbuild_clean(ctx) == 0);
+    assert(strcmp(log.text, "Build\nClean\n") == 0);
+
+    cbuild_context_free(ctx);
+}
+
 static void test_flag_values(void) {
     const char *repeated[] = { "cbuild", "--mode=first", "--mode", "last" };
     assert(strcmp(cbuild_get_flag_value(4, (char **)repeated, "mode", 0), "last") == 0);
@@ -286,6 +307,7 @@ static void test_run_tests(const char *self) {
 int main(int argc, char **argv) {
     if (argc >= 3 && strcmp(argv[1], "--child") == 0) return run_child(argc - 2, argv + 2);
 
+    test_sections();
     test_flag_values();
     test_test_registration();
     test_spawn(argv[0]);
@@ -324,12 +346,13 @@ int main(int argc, char **argv) {
     free(files);
 
     assert(cbuild_expand_wildcard("example/**/*.c", &files, &file_count) == 0);
-    assert(file_count == 5);
+    assert(file_count == 6);
     assert(strcmp(files[0], "example/build.c") == 0);
     assert(strcmp(files[1], "example/lib/build.c") == 0);
     assert(strcmp(files[2], "example/lib/src/lib.c") == 0);
     assert(strcmp(files[3], "example/lib/src/math.c") == 0);
     assert(strcmp(files[4], "example/main.c") == 0);
+    assert(strcmp(files[5], "example/tests/test_math.c") == 0);
     for (int i = 0; i < file_count; ++i) free(files[i]);
     free(files);
     assert(cbuild_expand_wildcard("example/*/src/*.h", &files, &file_count) == 0);

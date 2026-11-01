@@ -4,6 +4,43 @@
 
 static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag);
 
+CBUILD_INTERNAL void cbuild__build_begin(cbuild_context_t* ctx) {
+    cbuild__log_section(ctx, "Build");
+    ctx->build_compiled = 0;
+    ctx->build_linked = 0;
+    ctx->build_commands = 0;
+    ctx->build_started = cbuild__now_seconds();
+}
+
+CBUILD_INTERNAL void cbuild__build_succeeded(cbuild_context_t* ctx) {
+    int worked = ctx->build_compiled || ctx->build_linked || ctx->build_commands;
+    if (cbuild__is_nested()) {
+        if (worked) cbuild__write_nested_report(ctx, 0);
+        return;
+    }
+    if (!worked) {
+        cbuild__log_status(ctx, 1, "Up to date.");
+        return;
+    }
+    char* counts = NULL;
+    if (ctx->build_compiled) append_format(&counts, "%d compiled, ", ctx->build_compiled);
+    if (ctx->build_linked) append_format(&counts, "%d linked, ", ctx->build_linked);
+    if (ctx->build_commands) {
+        append_format(&counts, "%d command%s, ", ctx->build_commands, ctx->build_commands == 1 ? "" : "s");
+    }
+    cbuild__log_status(ctx, 1, "Build succeeded (%s%.1fs).", counts ? counts : "",
+                       cbuild__now_seconds() - ctx->build_started);
+    free(counts);
+}
+
+CBUILD_INTERNAL void cbuild__build_failed(cbuild_context_t* ctx, const char* message) {
+    if (cbuild__is_nested()) {
+        cbuild__write_nested_report(ctx, 1);
+        return;
+    }
+    cbuild__log_status(ctx, 0, "%s", message);
+}
+
 static void dfs_command_func(cbuild_context_t* ctx, command_t* cmd, int* error_flag_ptr) {
     if (!cmd || *error_flag_ptr)
         return;
@@ -151,22 +188,15 @@ int cbuild_clean(cbuild_context_t* ctx) {
     cbuild_init(ctx);
     cbuild__resolve_target_paths(ctx);
 
-    cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
+    cbuild__log_section(ctx, "Clean");
+    int nested = cbuild__is_nested();
+    if (!nested) cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
     for (int i = 0; i < ctx->subproject_count; ++i) {
         subproject_t* sub = ctx->subprojects[i];
-        cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
-        char old_cwd[PATH_MAX];
-        if (cbuild_get_cwd(old_cwd, sizeof(old_cwd)) == 0) {
-            if (chdir(sub->directory) == 0) {
-                cbuild_argv_t avv;
-                cbuild_argv_init(&avv);
-                cbuild_argv_append(&avv, sub->cbuild_exe);
-                cbuild_argv_append(&avv, "--clean");
-                (void)cbuild_spawn_process(ctx, &avv, 0, NULL);
-                cbuild_argv_free(&avv);
-                chdir(old_cwd);
-            }
-        }
+        if (!nested) cbuild__log_step(ctx, "CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
+        char* cmdline = cbuild__subproject_command_line(sub->directory, sub->alias, sub->cbuild_exe, "--clean");
+        (void)run_command(ctx, cmdline, 0, NULL);
+        free(cmdline);
     }
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
@@ -231,6 +261,7 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
     ctx->visited = calloc(ctx->target_count, sizeof(int));
     ctx->in_stack = calloc(ctx->target_count, sizeof(int));
 
+    cbuild__build_begin(ctx);
     if (target_name) {
         target_t* target_to_build = NULL;
         for (int i = 0; i < ctx->target_count; ++i) {
@@ -305,10 +336,10 @@ int cbuild_build(cbuild_context_t* ctx, const char* target_name) {
                 fclose(f);
             }
         }
-        cbuild__log_status(ctx, 1, "Build succeeded.");
+        cbuild__build_succeeded(ctx);
         return 0;
     } else {
-        cbuild__log_status(ctx, 0, "Build failed.");
+        cbuild__build_failed(ctx, "Build failed.");
         return -1;
     }
 }
@@ -515,6 +546,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
     }
 
     int compiled_sources = process_compile_jobs_parallel(ctx, t, error_flag);
+    ctx->build_compiled += compiled_sources;
     if (*error_flag) return;
 
     int obj_count = t->sources_count;
@@ -634,6 +666,7 @@ static void build_target(cbuild_context_t* ctx, target_t* t, int* error_flag) {
             *error_flag = 1;
         } else {
             t->rebuilt = 1;
+            ctx->build_linked++;
             /* On successful link, write signature of the link command */
             FILE* lf = fopen(link_sig_path, "wb");
             if (lf) {

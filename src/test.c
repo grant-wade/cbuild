@@ -152,7 +152,7 @@ CBUILD_INTERNAL void cbuild__list_tests(cbuild_context_t* ctx) {
     if (shown == 0) cbuild__log(ctx, CBUILD_LOG_INFO, "  (no tests)");
 }
 
-static double cbuild__now_seconds(void) {
+CBUILD_INTERNAL double cbuild__now_seconds(void) {
 #ifdef _WIN32
     return (double)GetTickCount64() / 1000.0;
 #else
@@ -376,7 +376,10 @@ static void cbuild__run_one_test(cbuild_test_run_t* run, int index) {
     if (result == CBUILD_TEST_FAIL) run->failed++;
     if (result == CBUILD_TEST_SKIP) run->skipped++;
     const char* label = result == CBUILD_TEST_PASS ? "PASS" : result == CBUILD_TEST_SKIP ? "SKIP" : "FAIL";
-    cbuild__log_step(ctx, label, CBUILD_COLOR_BLUE, "[%d/%d] %s (%.2fs%s)", run->finished, run->count,
+    const char* color = result == CBUILD_TEST_PASS   ? CBUILD_COLOR_GREEN
+                        : result == CBUILD_TEST_SKIP ? CBUILD_COLOR_YELLOW
+                                                     : CBUILD_COLOR_RED;
+    cbuild__log_step(ctx, label, color, "[%d/%d] %s (%.2fs%s)", run->finished, run->count,
                      test->name, elapsed, detail);
     if (result == CBUILD_TEST_FAIL) {
         char* text = cbuild__read_text_file(log_path);
@@ -453,6 +456,7 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
         return 0;
     }
 
+    cbuild__build_begin(ctx);
     int error_flag = 0;
     free(ctx->visited);
     free(ctx->in_stack);
@@ -469,10 +473,11 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     free(ctx->in_stack);
     ctx->in_stack = NULL;
     if (error_flag) {
-        cbuild__log_status(ctx, 0, "Build failed; tests not run.");
+        cbuild__build_failed(ctx, "Build failed; tests not run.");
         free(run.tests);
         return -1;
     }
+    cbuild__build_succeeded(ctx);
 
     const char* output_dir = ctx->active_config && ctx->active_config->output_dir
                                  ? ctx->active_config->output_dir
@@ -489,8 +494,8 @@ CBUILD_INTERNAL int cbuild__run_selected_tests(cbuild_context_t* ctx) {
     if (thread_count > MAXIMUM_WAIT_OBJECTS) thread_count = MAXIMUM_WAIT_OBJECTS;
 #endif
 
-    cbuild__log_step(ctx, "TEST", CBUILD_COLOR_BLUE, "Running %d test%s with %d job%s", run.count,
-                     run.count == 1 ? "" : "s", thread_count, thread_count == 1 ? "" : "s");
+    cbuild__log_section(ctx, "Test: %d test%s, %d job%s", run.count, run.count == 1 ? "" : "s", thread_count,
+                        thread_count == 1 ? "" : "s");
     double start = cbuild__now_seconds();
 
 #ifdef _WIN32

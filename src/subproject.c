@@ -2,6 +2,8 @@
 
 #include "cbuild_internal.h"
 
+#define CBUILD_NESTED_REPORT ".cbuild-nested-report"
+
 static void cbuild__parse_manifest(cbuild_context_t* ctx, subproject_t* sub) {
     if (sub->manifest_loaded)
         return;
@@ -53,7 +55,8 @@ static void cbuild__parse_manifest(cbuild_context_t* ctx, subproject_t* sub) {
         char* name = strtok(NULL, " \t");
         char* path = strtok(NULL, "\r\n");
 
-        if (type && name && path) {
+        if (type && name && path &&
+            (strcmp(type, "static_lib") == 0 || strcmp(type, "shared_lib") == 0 || strcmp(type, "executable") == 0)) {
             cbuild__trim(path);
             if (sub->target_count + 1 > sub->target_cap) {
                 sub->target_cap = sub->target_cap ? sub->target_cap * 2 : 4;
@@ -86,6 +89,57 @@ cbuild__find_subproject_target(subproject_t* sub, const char* tgt_name) {
     return NULL;
 }
 
+CBUILD_INTERNAL char* cbuild__subproject_command_line(const char* directory, const char* alias, const char* exe,
+                                                      const char* args) {
+    char* cmdline = NULL;
+#ifdef _WIN32
+    /* Shell commands use PowerShell on Windows. */
+    append_format(&cmdline, "Set-Location -LiteralPath '%s'; $env:CBUILD_NESTED='%s'; & '%s' %s", directory, alias, exe, args);
+#else
+    append_format(&cmdline, "cd '%s' && CBUILD_NESTED='%s' '%s' %s", directory, alias, exe, args);
+#endif
+    return cmdline;
+}
+
+CBUILD_INTERNAL void cbuild__write_nested_report(cbuild_context_t* ctx, int failed) {
+    FILE* report = fopen(CBUILD_NESTED_REPORT, "w");
+    if (!report) return;
+    fprintf(report, "%d %d %d %d\n", ctx->build_compiled, ctx->build_linked, ctx->build_commands, failed);
+    fclose(report);
+}
+
+static char* cbuild__subproject_report_path(subproject_t* sub) {
+    char* path = NULL;
+    append_format(&path, "%s/" CBUILD_NESTED_REPORT, sub->directory);
+    return path;
+}
+
+CBUILD_INTERNAL void cbuild__forget_subproject_report(subproject_t* sub) {
+    char* path = cbuild__subproject_report_path(sub);
+    if (path) remove(path);
+    free(path);
+}
+
+CBUILD_INTERNAL int cbuild__collect_subproject_report(cbuild_context_t* ctx, subproject_t* sub) {
+    char* path = cbuild__subproject_report_path(sub);
+    if (!path) return 0;
+    int compiled = 0, linked = 0, commands = 0, failed = 0;
+    FILE* report = fopen(path, "r");
+    if (report) {
+        if (fscanf(report, "%d %d %d %d", &compiled, &linked, &commands, &failed) == 4) {
+            ctx->build_compiled += compiled;
+            ctx->build_linked += linked;
+            ctx->build_commands += commands;
+        } else {
+            failed = 0;
+        }
+        fclose(report);
+        remove(path);
+    }
+    free(path);
+    return failed;
+}
+
 subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, const char* directory,
                                     const char* cbuild_exe) {
     subproject_t* sub = (subproject_t*)calloc(1, sizeof(subproject_t));
@@ -93,17 +147,12 @@ subproject_t* cbuild_add_subproject(cbuild_context_t* ctx, const char* alias, co
     sub->directory = strdup(directory);
     sub->cbuild_exe = strdup(cbuild_exe);
 
-    char* cmdline = NULL;
-#ifdef _WIN32
-    /* Shell commands use PowerShell on Windows. */
-    append_format(&cmdline, "Set-Location -LiteralPath '%s'; & '%s'", directory, cbuild_exe);
-#else
-    append_format(&cmdline, "cd '%s' && '%s'", directory, cbuild_exe);
-#endif
+    char* cmdline = cbuild__subproject_command_line(directory, alias, cbuild_exe, "");
     char build_cmd_name[256];
     snprintf(build_cmd_name, sizeof(build_cmd_name), "build subproject %s",
              alias);
     sub->build_cmd = cbuild_command(ctx, build_cmd_name, cmdline);
+    if (sub->build_cmd) sub->build_cmd->subproject = sub;
     free(cmdline);
 
     if (ctx->subproject_count + 1 > ctx->subproject_cap) {

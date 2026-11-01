@@ -220,7 +220,8 @@ typedef enum {
     CBUILD_LOG_STEP,
     CBUILD_LOG_STATUS_OK,
     CBUILD_LOG_STATUS_FAIL,
-    CBUILD_LOG_VERBOSE
+    CBUILD_LOG_VERBOSE,
+    CBUILD_LOG_SECTION
 } cbuild_log_level_t;
 
 typedef void (*cbuild_log_fn)(void* user_data, cbuild_log_level_t level, const char* msg);

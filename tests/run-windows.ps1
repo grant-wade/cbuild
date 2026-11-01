@@ -218,10 +218,24 @@ try {
     & $CC /nologo /std:c11 /W4 /D_CRT_SECURE_NO_WARNINGS `
         build.c /Fe:cbuild.exe
     Assert-LastExitCode "Example build-program compile"
-    $null = Invoke-Capture .\cbuild.exe @() "example-build.log"
+    $exampleBuild = Invoke-Capture .\cbuild.exe @() "example-build.log"
+    if (([regex]::Matches($exampleBuild, "Build succeeded")).Count -ne 1) { throw "Example subproject was not nested" }
+    if ($exampleBuild -notmatch "src/math.c") { throw "Example subproject did not build" }
     $example = Invoke-Capture .\cbuild.exe @("--run=run") "example-run.log"
     if ($example -notmatch "2 \+ 3 = 5") { throw "Example output is incorrect" }
-    $null = Invoke-Capture .\cbuild.exe @("--clean") "example-clean.log"
+    if ($example -notmatch "Run: run") { throw "Example run section is missing" }
+    $exampleTests = Invoke-Capture .\cbuild.exe @("--test") "example-test.log"
+    if ($exampleTests -notmatch " 0 failed") { throw "Example tests did not run" }
+    $env:MATH_SLOW_TESTS = "1"
+    try {
+        $exampleSlow = Invoke-Capture .\cbuild.exe @("--test", "--test-label=slow") "example-test-slow.log"
+    }
+    finally {
+        Remove-Item Env:MATH_SLOW_TESTS
+    }
+    if ($exampleSlow -notmatch "Tests: 1 passed") { throw "Example slow test did not run" }
+    $exampleClean = Invoke-Capture .\cbuild.exe @("--clean") "example-clean.log"
+    if (([regex]::Matches($exampleClean, "Clean complete")).Count -ne 1) { throw "Example subproject clean was not nested" }
 }
 finally {
     Set-Location $Root

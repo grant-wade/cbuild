@@ -38,6 +38,7 @@
 #define strcasecmp _stricmp
 #define strdup _strdup
 #define isatty _isatty
+#define fileno _fileno
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -72,7 +73,6 @@ extern char** environ; /* for posix_spawnp */
 
 #define CBUILD_EXE_SUFFIX ".exe"
 
-#ifndef _WIN32
 #define CBUILD_COLOR_RESET "\033[0m"
 #define CBUILD_COLOR_BOLD "\033[1m"
 #define CBUILD_COLOR_GREEN "\033[32m"
@@ -80,15 +80,10 @@ extern char** environ; /* for posix_spawnp */
 #define CBUILD_COLOR_BLUE "\033[34m"
 #define CBUILD_COLOR_MAGENTA "\033[35m"
 #define CBUILD_COLOR_RED "\033[31m"
+
+#ifndef _WIN32
 #define CBUILD_OBJ_EXT ".o"
 #else
-#define CBUILD_COLOR_RESET ""
-#define CBUILD_COLOR_BOLD ""
-#define CBUILD_COLOR_GREEN ""
-#define CBUILD_COLOR_YELLOW ""
-#define CBUILD_COLOR_BLUE ""
-#define CBUILD_COLOR_MAGENTA ""
-#define CBUILD_COLOR_RED ""
 #define CBUILD_OBJ_EXT ".obj"
 #endif
 
@@ -209,6 +204,12 @@ struct cbuild_context {
     int global_ldflag_count;
     int global_ldflag_cap;
     int verbose;
+    int section_started;
+    int nested_announced;
+    int build_compiled;
+    int build_linked;
+    int build_commands;
+    double build_started;
     char** target_filters;
     int target_filter_count;
     int target_filter_cap;
@@ -314,6 +315,7 @@ struct cbuild_command {
     int executed;
     int in_progress;  // set while running, to detect dependency cycles
     int result;
+    subproject_t* subproject;  // the subproject this command builds, if any
 };
 
 struct cbuild_config {
@@ -462,7 +464,26 @@ CBUILD_INTERNAL void cbuild__clean_dir(cbuild_context_t* ctx, const char* path);
 CBUILD_INTERNAL void cbuild__log(cbuild_context_t* ctx, cbuild_log_level_t level, const char* fmt, ...);
 CBUILD_INTERNAL void cbuild__log_step(cbuild_context_t* ctx, const char* label, const char* color, const char* fmt, ...);
 CBUILD_INTERNAL void cbuild__log_status(cbuild_context_t* ctx, int ok, const char* fmt, ...);
+CBUILD_INTERNAL void cbuild__log_section(cbuild_context_t* ctx, const char* fmt, ...);
 CBUILD_INTERNAL void cbuild__set_error(cbuild_context_t* ctx, const char* fmt, ...);
+CBUILD_INTERNAL int cbuild__is_nested(void);
+
+/* build.c */
+CBUILD_INTERNAL void cbuild__build_begin(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__build_succeeded(cbuild_context_t* ctx);
+CBUILD_INTERNAL void cbuild__build_failed(cbuild_context_t* ctx, const char* message);
+
+/* test.c */
+CBUILD_INTERNAL double cbuild__now_seconds(void);
+
+/* subproject.c */
+/* Returns a malloc'd shell command running exe with args in directory. */
+CBUILD_INTERNAL char* cbuild__subproject_command_line(const char* directory, const char* alias, const char* exe,
+                                                      const char* args);
+CBUILD_INTERNAL void cbuild__write_nested_report(cbuild_context_t* ctx, int failed);
+CBUILD_INTERNAL void cbuild__forget_subproject_report(subproject_t* sub);
+/* Adds the subproject's reported work to ctx; returns nonzero if it reported a failed build. */
+CBUILD_INTERNAL int cbuild__collect_subproject_report(cbuild_context_t* ctx, subproject_t* sub);
 
 /* process.c */
 CBUILD_INTERNAL void cbuild_argv_init(cbuild_argv_t* argv);

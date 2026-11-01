@@ -32,6 +32,7 @@ static int cbuild__flag_on_compile_commands(const char* v, void* u) {
 static int cbuild__flag_on_list(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild__resolve_target_paths(ctx);
     cbuild__log(ctx, CBUILD_LOG_INFO, "Available targets:");
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
@@ -115,6 +116,7 @@ static int cbuild__flag_on_graph(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
 
+    cbuild__resolve_target_paths(ctx);
     cbuild__log(ctx, CBUILD_LOG_INFO, "Build graph:");
     if (ctx->target_count == 0) {
         cbuild__log(ctx, CBUILD_LOG_INFO, "  (no targets)");
@@ -214,6 +216,7 @@ static int cbuild__flag_on_deps(const char* v, void* u) {
         cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: target '%s' not found", v);
         return 1;
     }
+    cbuild__resolve_target_paths(ctx);
     target_t* root = ctx->targets[idx];
     const char* name = root->name ? root->name : (root->output_file ? root->output_file : "(unnamed)");
     cbuild__log(ctx, CBUILD_LOG_INFO, "%s [%s]", name, cbuild__type_str(root->type));
@@ -228,6 +231,7 @@ static int cbuild__flag_on_deps(const char* v, void* u) {
 static int cbuild__flag_on_manifest(const char* v, void* u) {
     (void)v;
     cbuild_context_t* ctx = (cbuild_context_t*)u;
+    cbuild__resolve_target_paths(ctx);
     for (int i = 0; i < ctx->target_count; ++i) {
         target_t* t = ctx->targets[i];
         if (!t->output_file || !t->name) continue;
@@ -466,6 +470,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
             return rc;
         }
 
+        if (match->target) cbuild__build_begin(ctx);
         dfs_build_func(ctx, match->target, &error_flag);
 
         free(ctx->visited);
@@ -474,11 +479,13 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
         ctx->in_stack = NULL;
 
         if (error_flag) {
-            cbuild__log_status(ctx, 0, "Build failed.");
+            cbuild__build_failed(ctx, "Build failed.");
             return 1;
         }
+        if (match->target) cbuild__build_succeeded(ctx);
 
         int sub_rc = 0;
+        cbuild__log_section(ctx, "Run: %s", match->name);
         if (match->command_line) {
             cbuild__log_step(ctx, "SUBCMD", CBUILD_COLOR_BLUE, "Running '%s': %s", match->name, match->command_line);
             sub_rc = run_command(ctx, match->command_line, 0, NULL);
@@ -544,6 +551,7 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
         }
     }
 
+    cbuild__build_begin(ctx);
     if (ctx->target_filter_count > 0) {
         for (int f = 0; f < ctx->target_filter_count; ++f) {
             target_t* target_to_build = NULL;
@@ -622,10 +630,10 @@ int cbuild_run(cbuild_context_t* ctx, int argc, char** argv) {
                 fclose(f);
             }
         }
-        cbuild__log_status(ctx, 1, "Build succeeded.");
+        cbuild__build_succeeded(ctx);
         return 0;
     } else {
-        cbuild__log_status(ctx, 0, "Build failed.");
+        cbuild__build_failed(ctx, "Build failed.");
         return 1;
     }
 }
