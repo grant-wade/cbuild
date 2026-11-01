@@ -214,12 +214,12 @@ Errors come back through `cbuild_get_last_error`, and `cbuild_set_logger` sends 
 `cbuild.h` is a generated file, so don't edit it. The real code is in [`src/`](src/) as ordinary C files, and [`tools/amalgamate.c`](tools/amalgamate.c) stitches them into the single header:
 
 ```sh
-cc tools/amalgamate.c -o amalgamate
-./amalgamate            # rewrite cbuild.h from src/
-./amalgamate --check    # exit 1 if cbuild.h is out of date
+cc -std=c11 build.c -o cbuild
+./cbuild amalgamate              # rewrite cbuild.h from src/
+./cbuild --target=check_header   # fail if cbuild.h is out of date
 ```
 
-You shouldn't need to run that by hand. Turn on the pre-commit hook once per clone and it regenerates and stages `cbuild.h` on every commit:
+Turn on the pre-commit hook once per clone and it regenerates and stages `cbuild.h` on every commit:
 
 ```sh
 git config core.hooksPath .githooks
@@ -233,7 +233,15 @@ A few things worth knowing when you're in `src/`:
 - A helper used by more than one file is declared in `cbuild_internal.h` with `CBUILD_INTERNAL` instead of `static`. It still ends up `static` in the generated header.
 - New `.c` and `.h` files in `src/` are picked up automatically.
 
-Run the tests with `tests/run-posix.sh` (or `tests/run-windows.ps1`). Releases are automatic and described in [`docs/releasing.md`](docs/releasing.md).
+The repository's own `build.c` regenerates the header and runs the tests ([`tests/readme.md`](tests/readme.md)):
+
+```sh
+cc -std=c11 build.c -o cbuild
+./cbuild amalgamate
+./cbuild --test
+```
+
+Releases are automatic and described in [`docs/releasing.md`](docs/releasing.md).
 
 ## License
 

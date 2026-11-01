@@ -9,7 +9,7 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - Tests: `cbuild_add_test` registers a test program with labels, a skip exit code, a timeout, a lock shared with tests that must not overlap, and extra targets to build first. `./cbuild --test` builds what the selected tests need and runs them in parallel, printing the output of failures and keeping every log in `<output dir>/tests/`. Select with `--test-label`, `--test-filter`, and `--test-exclude`; list with `--list-tests`; set a default limit with `--test-timeout`. `cbuild_run_tests` does the same without the CLI.
 - `cbuild_spawn` runs a program without a shell, optionally capturing its output, for use in callbacks and build programs.
 - `cbuild_get_flag_value` reads a flag's value from argv before the graph is defined, like `cbuild_has_flag` for flags that take values.
-- `tests/run-test-runner.py` tests the test framework on every platform.
+- The test suite is written in C and needs only a C and C++ compiler. The repository's `build.c` runs it with `./cbuild --test` and regenerates the header with `./cbuild amalgamate`.
 - `example/` registers tests for its library and executable with `cbuild_add_test`.
 - Output has section headers for its setup, build, test, run, and clean phases, logged at the new `CBUILD_LOG_SECTION` level.
 - Subproject builds and cleans run with `CBUILD_NESTED` set, print nothing when they have no work, and leave the end-of-build status to their parent.
@@ -22,6 +22,10 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 
 - `CPPFLAGS` and `CFLAGS` from the environment reach compile commands and `LDFLAGS` reaches link commands; they previously only forced rebuilds.
 - `cbuild_remove_dir` deleted the contents of symlinked directories.
+- Self-rebuilds ignored `CC`; they now use `CC_FOR_BUILD`, then `CC`, then `cc` or `cl`.
+- A failed self-rebuild left no build program.
+- Compiler arguments and names containing `cl` were mistaken for MSVC, and `clang-cl` was not recognized as MSVC-style.
+- MSVC-style compilers always linked with `cl` instead of the configured compiler.
 - Test timeouts left processes started by the test running.
 - Stopping `--test` with a signal left running tests behind on POSIX.
 - Subproject manifests ignore output lines that are not targets.

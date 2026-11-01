@@ -62,10 +62,10 @@ static int hold_exclusive(const char *path, int ms) {
     return remove(path) == 0 ? 0 : 4;
 }
 
-/* Starts a copy of this program that creates path after ms, and waits for it. */
-static int spawn_delayed_touch(const char *self, const char *ms, const char *path) {
+/* Starts a copy of this program that creates started, then path after ms, and waits for it. */
+static int spawn_delayed_touch(const char *self, const char *ms, const char *started, const char *path) {
     char command[1024];
-    snprintf(command, sizeof(command), "%s --sleep %s --touch %s", self, ms, path);
+    snprintf(command, sizeof(command), "%s --touch %s --sleep %s --touch %s", self, started, ms, path);
     return system(command) == 0 ? 0 : 7;
 }
 
@@ -94,8 +94,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(action, "--touch") == 0) {
             rc = create_file(argv[++i]) ? 0 : 8;
         } else if (strcmp(action, "--spawn-touch") == 0) {
-            rc = spawn_delayed_touch(argv[0], argv[i + 1], argv[i + 2]);
-            i += 2;
+            rc = spawn_delayed_touch(argv[0], argv[i + 1], argv[i + 2], argv[i + 3]);
+            i += 3;
         } else if (strcmp(action, "--stdin-empty") == 0) {
             rc = getchar() == EOF ? 0 : 5;
         } else if (strcmp(action, "--env") == 0) {

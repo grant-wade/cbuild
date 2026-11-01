@@ -20,11 +20,10 @@ The workflow requires semantic version format with a leading `v`, and verifies t
 ## Release checklist
 
 1. Update all four version macros in `src/cbuild.h` and regenerate `cbuild.h` (the pre-commit hook does this; see the README's Development section).
-2. Update version assertions in `tests/api_smoke.c`, `tests/include_smoke.c`, `tests/include_smoke.cpp`, `tests/run-posix.sh`, and `tests/run-windows.ps1`.
-3. Update the current version shown in `readme.md`.
-4. Add the new version and release notes to `CHANGELOG.md`.
-5. Open or update a pull request and wait for every CI job to pass.
-6. Merge the version change to `main`.
+2. Update the current version shown in `readme.md`.
+3. Add the new version and release notes to `CHANGELOG.md`.
+4. Open or update a pull request and wait for every CI job to pass.
+5. Merge the version change to `main`.
 
 The successful `main` workflow then:
 

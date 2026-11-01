@@ -1,6 +1,8 @@
 /*
  * amalgamate.c - generate the single-header cbuild.h from the sources in src/.
  *
+ *     ./cbuild amalgamate     # build this tool and rewrite cbuild.h
+ *
  *     cc tools/amalgamate.c -o amalgamate
  *     ./amalgamate            # rewrite cbuild.h
  *     ./amalgamate --check    # exit 1 if cbuild.h is out of date
@@ -296,7 +298,8 @@ int main(int argc, char** argv) {
                     out_path, src_dir, first_diff_line(&existing, &generated));
         fprintf(stderr,
                 "%s is generated: edit the files in %s/, then regenerate and commit it:\n"
-                "    cc tools/amalgamate.c -o amalgamate && ./amalgamate\n"
+                "    ./cbuild amalgamate\n"
+                "    or: cc tools/amalgamate.c -o amalgamate && ./amalgamate\n"
                 "Enable the pre-commit hook to do this automatically:\n"
                 "    git config core.hooksPath .githooks\n",
                 out_path, src_dir);

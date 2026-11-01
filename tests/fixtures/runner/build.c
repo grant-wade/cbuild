@@ -81,13 +81,13 @@ int main(int argc, char **argv) {
     const char *spaced_args[] = { "--out", "spaced-output\n" };
     cbuild_add_test(ctx, "env_spaced_program", spaced, spaced_args, 2);
 
-    cbuild_test_set_timeout(ctx, PROBE("time_own", "time_own", "--out", "before-timeout\n", "--sleep", "60000"), 1);
+    cbuild_test_set_timeout(ctx, PROBE("time_own", "time_own", "--out", "before-timeout\n", "--sleep", "60000"), 3);
     PROBE("time_default", "time_default", "--sleep", "60000");
     cbuild_test_set_timeout(ctx, PROBE("time_negative", "time_default", "--sleep", "60000"), -5);
     cbuild_test_set_timeout(ctx, PROBE("time_own_longer", "time_longer", "--sleep", "2000"), 60);
 
-    cbuild_test_set_timeout(ctx, PROBE("time_tree", "time_tree", "--spawn-touch", "3000", "sync/survivor"), 1);
-    PROBE("time_tree_stopped", "time_tree_stopped", "--touch", "sync/started", "--spawn-touch", "3000", "sync/survivor");
+    cbuild_test_set_timeout(ctx, PROBE("time_tree", "time_tree", "--spawn-touch", "3000", "sync/started", "sync/survivor"), 2);
+    PROBE("time_tree_stopped", "time_tree_stopped", "--spawn-touch", "3000", "sync/started", "sync/survivor");
 
     PROBE("par_one", "par", "--rendezvous", "sync/par_one", "sync/par_two");
     PROBE("par_two", "par", "--rendezvous", "sync/par_two", "sync/par_one");

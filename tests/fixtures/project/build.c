@@ -1,5 +1,5 @@
 #define CBUILD_IMPLEMENTATION
-#include "../../cbuild.h"
+#include "cbuild.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -88,7 +88,7 @@ int main(int argc, char **argv) {
     cbuild_context_t *ctx = cbuild_context_new();
     if (!ctx) return 1;
 
-    CBUILD_SELF_REBUILD(ctx, argc, argv, "build.c", "../../cbuild.h");
+    CBUILD_SELF_REBUILD(ctx, argc, argv, "build.c", "cbuild.h");
 
     const char *compiler = getenv("CC");
     if (compiler && *compiler) cbuild_set_compiler(ctx, compiler);

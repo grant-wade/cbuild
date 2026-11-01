@@ -136,7 +136,7 @@ void cbuild_guess_compiler(cbuild_context_t *ctx);
 void cbuild_set_verbose(cbuild_context_t *ctx, int verbose);
 ```
 
-Compiler, linker, and archiver strings may include fixed arguments, such as `zig cc -target x86_64-linux-musl`.
+Compiler, linker, and archiver strings may include fixed arguments, such as `zig cc -target x86_64-linux-musl`. A compiler named `cl`, `clang-cl`, or `icl`, optionally after `ccache` or `sccache`, takes MSVC-style flags; every other compiler takes GCC-style flags.
 
 Self-rebuild support is available directly or through the macro described below:
 
@@ -145,6 +145,8 @@ int cbuild_self_rebuild_if_needed(cbuild_context_t *ctx,
                                   int argc, char **argv,
                                   const char **sources, int source_count);
 ```
+
+A rebuild compiles with `CC_FOR_BUILD`, then `CC`, then `cc` (`cl` on Windows), without `CFLAGS` or `LDFLAGS`. When the compile fails, the old program is restored and the rebuild returns `-1`. When the new program cannot start, the old program is restored and keeps running after a warning.
 
 ## Build configurations
 

@@ -1,0 +1,136 @@
+/* scenarios.h - every scenario, as X(group, name). A scenario is registered as the test group.name. */
+#ifndef SCENARIOS_H
+#define SCENARIOS_H
+
+#define SCENARIOS(X)                                                 \
+    X(header, declarations_compile_as_c)                             \
+    X(header, declarations_compile_as_cpp)                           \
+                                                                     \
+    X(api, version_macros_agree)                                     \
+    X(api, user_data_and_logger)                                     \
+    X(api, file_helpers)                                             \
+    X(api, wildcards)                                                \
+    X(api, remove_dir_does_not_follow_links)                         \
+    X(api, flag_values)                                              \
+    X(api, callback_commands)                                        \
+    X(api, configuration_setters)                                    \
+    X(api, invalid_arguments_set_the_last_error)                     \
+    X(api, reset_allows_a_new_graph)                                 \
+    X(api, sections)                                                 \
+    X(api, target_listing)                                           \
+    X(api, test_registration)                                        \
+    X(api, spawn)                                                    \
+    X(api, run_tests)                                                \
+                                                                     \
+    X(regress, generated_files_respect_dependencies)                 \
+    X(regress, explicit_output_paths)                                \
+    X(regress, compile_commands_use_target_settings)                 \
+    X(regress, repeated_builds_are_noops)                            \
+    X(regress, edits_within_the_same_second_are_noticed)             \
+    X(regress, header_edits_rebuild_their_includers)                 \
+    X(regress, missing_header_fails_until_restored)                  \
+    X(regress, dropped_header_does_not_break_the_build)              \
+    X(regress, failed_compilation_recovers)                          \
+    X(regress, changing_a_define_rebuilds_its_target)                \
+    X(regress, changing_target_cflags_rebuilds_and_relinks)          \
+    X(regress, compiler_arguments_do_not_change_its_style)           \
+    X(regress, environment_cflags_reach_the_compiler)                \
+    X(regress, environment_cppflags_reach_the_compiler)              \
+    X(regress, environment_ldflags_reach_the_linker)                 \
+    X(regress, deleted_object_comes_back)                            \
+    X(regress, deleted_depfile_comes_back)                           \
+    X(regress, deleted_signature_comes_back)                         \
+    X(regress, deleted_library_is_relinked)                          \
+    X(regress, deleted_executable_is_relinked)                       \
+    X(regress, deleted_generated_file_is_regenerated)                \
+    X(regress, rebuilt_generator_regenerates)                        \
+    X(regress, command_cycles_are_reported)                          \
+    X(regress, clean_removes_only_outputs)                           \
+    X(regress, clean_refuses_the_project_directory)                  \
+    X(regress, clean_through_a_linked_output_directory)              \
+                                                                     \
+    X(runner, listing_builds_nothing)                                \
+    X(runner, listing_shows_every_label)                             \
+    X(runner, listing_reports_an_empty_selection)                    \
+    X(runner, list_tests_takes_precedence_over_test)                 \
+    X(runner, selection_combines_labels_filters_and_excludes)        \
+    X(runner, running_matches_the_selection)                         \
+    X(runner, an_empty_selection_succeeds_without_building)          \
+    X(runner, selection_flags_need_values)                           \
+    X(runner, unexpected_arguments_stop_the_run)                     \
+    X(runner, passing_tests_keep_their_output_quiet)                 \
+    X(runner, failing_tests_print_their_output)                      \
+    X(runner, skips_do_not_fail_the_run)                             \
+    X(runner, other_nonzero_exits_fail)                              \
+    X(runner, logs_capture_stdout_and_stderr)                        \
+    X(runner, logs_are_named_after_sanitized_test_names)             \
+    X(runner, logs_follow_the_config_output_dir)                     \
+    X(runner, reruns_replace_logs_and_tests_inherit_the_environment) \
+    X(runner, tests_never_see_the_build_programs_stdin)              \
+    X(runner, arguments_arrive_intact)                               \
+    X(runner, programs_can_live_at_paths_with_spaces)                \
+    X(runner, own_timeouts_kill_the_test)                            \
+    X(runner, the_default_timeout_covers_tests_without_their_own)    \
+    X(runner, a_tests_own_timeout_beats_the_default)                 \
+    X(runner, timeouts_kill_everything_the_test_started)             \
+    X(runner, stopping_the_run_stops_running_tests)                  \
+    X(runner, tests_run_in_parallel)                                 \
+    X(runner, one_job_runs_tests_one_at_a_time)                      \
+    X(runner, locked_tests_never_overlap)                            \
+    X(runner, different_locks_do_not_block_each_other)               \
+    X(runner, cleared_locks_do_not_block)                            \
+    X(runner, a_blocked_test_does_not_hold_up_runnable_ones)         \
+    X(runner, unselected_dependencies_are_not_built)                 \
+    X(runner, added_dependencies_build_before_the_test)              \
+    X(runner, non_executable_targets_build_before_args0_runs)        \
+    X(runner, up_to_date_tests_rerun_without_compiling)              \
+    X(runner, source_edits_rebuild_before_the_test_runs)             \
+    X(runner, build_failures_stop_the_run)                           \
+    X(runner, sections_separate_the_build_from_the_run)              \
+    X(runner, nested_builds_report_only_their_steps_and_errors)      \
+    X(runner, plain_builds_and_cleans_have_sections)                 \
+    X(runner, color_follows_the_environment)                         \
+    X(runner, listings_show_the_paths_builds_use)                    \
+    X(runner, unselected_broken_targets_do_not_matter)               \
+    X(runner, flag_phases_wrap_the_run)                              \
+                                                                     \
+    X(project, version_prints_the_header_version)                    \
+    X(project, help_lists_builtin_and_custom_flags)                  \
+    X(project, list_shows_every_target)                              \
+    X(project, graph_shows_dependencies)                             \
+    X(project, deps_lists_reverse_dependencies)                      \
+    X(project, manifest_lists_targets_by_kind)                       \
+    X(project, unknown_names_are_rejected)                           \
+    X(project, first_build_produces_every_output)                    \
+    X(project, app_uses_everything_it_links)                         \
+    X(project, compile_commands_are_valid)                           \
+    X(project, up_to_date_build_does_nothing)                        \
+    X(project, flags_can_change_defines_before_the_build)            \
+    X(project, run_flag_runs_a_subcommand)                           \
+    X(project, bare_name_runs_a_subcommand)                          \
+    X(project, generated_file_input_regenerates)                     \
+    X(project, build_program_rebuilds_itself)                        \
+    X(project, rebuild_defaults_without_compiler_settings)           \
+    X(project, rebuild_prefers_cc_for_build_to_cc)                   \
+    X(project, rebuilt_program_comes_from_the_chosen_compiler)       \
+    X(project, failed_rebuild_stops_and_keeps_the_old_program)       \
+    X(project, syntax_error_in_the_build_program_stops_the_run)      \
+    X(project, unstartable_rebuild_keeps_the_old_program)            \
+    X(project, registered_tests_run_against_real_targets)            \
+    X(project, flags_can_register_tests)                             \
+    X(project, spawn_helper_captures_output)                         \
+    X(project, clean_removes_outputs)                                \
+                                                                     \
+    X(subproject, setup_output_does_not_confuse_the_manifest)        \
+    X(subproject, parent_builds_and_links_child_targets)             \
+                                                                     \
+    X(example, builds_nest_their_subproject)                         \
+    X(example, up_to_date_build_hides_the_subproject)                \
+    X(example, subproject_edits_rebuild_through_the_parent)          \
+    X(example, broken_subproject_fails_once)                         \
+    X(example, clean_is_nested)                                      \
+    X(example, run_subcommand_prints_its_output)                     \
+    X(example, registered_tests_pass)                                \
+    X(example, slow_tests_run_on_request)
+
+#endif

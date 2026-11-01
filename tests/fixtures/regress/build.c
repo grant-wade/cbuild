@@ -1,5 +1,3 @@
-/* Regression project for rebuild correctness and clean safety. Driven by
- * tests/run-regress.py, which builds a scratch copy and mutates it. */
 #define CBUILD_IMPLEMENTATION
 #include "cbuild.h"
 

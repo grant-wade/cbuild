@@ -1,51 +1,77 @@
 # Test suite
 
-The test suite is intentionally toolchain-free beyond a C/C++ compiler, Python 3, and PowerShell on Windows.
-
-## Coverage
-
-- The committed `cbuild.h` matches what `tools/amalgamate.c` generates from `src/`
-- `src/` compiled as separate translation units and linked against the API smoke test
-- Declaration-only inclusion from C and C++
-- Public version macros
-- Context lifecycle, reset, logging, user data, and error reporting
-- Filesystem and wildcard helpers, including `cbuild_remove_dir` with links
-- Build configuration APIs
-- Callback and argv commands, including command dependencies
-- Programmatic target builds and cleaning
-- Executable, static library, shared library, dummy, and generated-file targets
-- Parallel builds and no-op incremental builds
-- Header dependency and compile-signature invalidation
-- `compile_commands.json` generation and JSON parsing
-- Target listing/filtering, graph and reverse-dependency output, manifests, custom flags (in every phase), and subcommands
-- `cbuild_spawn` output capture, exit status, and argument validation; `cbuild_get_flag_value` parsing; `cbuild_add_test` validation; `cbuild_run_tests` selection and return values
-- Test framework (`tests/runner`, all platforms): listing and selection, pass, skip, and failure reporting, exit status, log contents and locations, standard input, environment, argument passing, timeouts and process trees, stopping a run, parallelism, locks, build dependencies, build failures, flag phases, output sections and status lines, color, and subproject reporting
-- Self-rebuilding build programs
-- Rebuild-correctness regressions (`tests/regress`, all platforms): paths containing spaces, edits made within a second of the previous build, removed headers, failed compilation, changed flags, `CFLAGS`, `CPPFLAGS`, and `LDFLAGS` from the environment, deleted intermediate outputs, repeated no-op builds, explicit output paths, generator dependencies, and command dependency cycles
-- `--clean` safety: symbolic links and Windows junctions, files outside the build outputs, and output directories that contain the project
-- Subproject discovery, build, link, run, test, and clean behavior through the repository example
-
-## Local use
+The test suite needs only a C and C++ compiler. It is built and run by `build.c` in the repository root.
 
 Linux, macOS, or FreeBSD:
 
 ```sh
-CC=cc CXX=c++ tests/run-posix.sh
+cc -std=c11 build.c -o cbuild
+./cbuild --test
 ```
 
-Both platform scripts run `tests/run-regress.py` and `tests/run-test-runner.py`, which can also be run on their own (for example `python3 tests/run-regress.py`, honouring `CC`, `CFLAGS`, and `LDFLAGS`). Each scenario gets a fresh copy of `tests/regress` or `tests/runner`.
+Windows, from a Developer Command Prompt:
 
-To use another compiler:
+```bat
+cl /nologo /std:c11 /D_CRT_SECURE_NO_WARNINGS build.c /Fe:cbuild.exe
+.\cbuild.exe --test
+```
+
+| Command | Effect |
+|---|---|
+| `./cbuild amalgamate` | Regenerate `cbuild.h` from `src/` |
+| `./cbuild --target=check_header` | Fail if `cbuild.h` does not match `src/` |
+| `./cbuild --test` | Run the tests |
+| `./cbuild` | Build the tools, suites, and fixture programs |
+| `./cbuild --clean` | Remove `build/` |
+
+`./cbuild` rebuilds itself when `build.c`, `cbuild.h`, or `tests/suite/scenarios.h` change. `--test` stops before running tests when `cbuild.h` does not match `src/`.
+
+`CC`, `CXX`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, and `LDFLAGS` apply to the suite and everything it builds. Sanitizer runs set the sanitizer flags in both `CFLAGS` and `LDFLAGS`. `CC_FOR_BUILD` overrides `CC` when `./cbuild` rebuilds itself.
+
+## Selecting tests
+
+Each scenario is one test named `group.scenario`, with its group as a label.
 
 ```sh
-CC=clang CXX=clang++ tests/run-posix.sh
+./cbuild --list-tests
+./cbuild --test --test-label=regress
+./cbuild --test --test-filter='runner.*timeout*'
 ```
 
-Windows, from a Developer PowerShell with MSVC available:
+Logs are in `build/tests/`. Each scenario works in `build/test work/<test name>/`, which is deleted when it passes and kept when it fails.
 
-```powershell
-$env:CC = "cl"
-tests/run-windows.ps1
+## Layout
+
+- `build.c` builds the suite and registers its tests.
+- `tests/suite/scenarios.h` lists every scenario.
+- `tests/suite/harness.c` has the process, file, and output helpers; `json.c` reads `compile_commands.json`.
+- `tests/suite/<group>.c` holds the scenarios of a group.
+- `tests/fixtures/` holds the projects scenarios build.
+
+## Groups
+
+| Label | Covers |
+|---|---|
+| `header` | The declarations in `cbuild.h` compile as C and C++ |
+| `api` | The public API called in process: logging, filesystem and wildcard helpers, flag parsing, commands, configurations, reset, listings, test registration, `cbuild_spawn`, and `cbuild_run_tests` |
+| `split` | The `api` scenarios against `src/` built as separate translation units |
+| `regress` | Rebuild correctness and clean safety: paths with spaces, sub-second edits, headers, failed compilation, changed flags, environment flags, deleted outputs, generators, command cycles, links, and junctions |
+| `runner` | The test framework: selection, results, logs, environment, standard input, arguments, timeouts, process trees, signals, parallelism, locks, build dependencies, flag phases, output sections, and color |
+| `project` | The command line against a project with every target kind: listings, manifests, outputs, `compile_commands.json`, flags, subcommands, generated files, self-rebuild and its compiler choice and failures, registered tests, and clean |
+| `subproject` | Parent projects building and linking child targets, and child output that is not part of the manifest |
+| `example` | The repository example: nested builds, rebuilds, failures, clean, run, and tests |
+
+## Adding a scenario
+
+Add `X(group, name)` to `tests/suite/scenarios.h` and define it in `tests/suite/<group>.c`:
+
+```c
+SCENARIO(regress, header_edits_rebuild_their_includers) {
+    BUILD();
+    settle();
+    touch_file("space dir/include/spaced.h");
+    EXPECT_STEPS(BUILD(), "COMPILE", 2, NULL);
+}
 ```
 
-The scripts clean their executables, logs, and build outputs even when a test fails.
+A scenario starts in a fresh copy of its group's fixture, sets what it needs, and fails by exiting through a `CHECK` or `EXPECT_*`. `h_skip` skips it on platforms where it does not apply.

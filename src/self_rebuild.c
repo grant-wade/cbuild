@@ -17,20 +17,50 @@ static int cbuild__needs_rebuild(const char* exe_path, const char** sources,
     return 0;
 }
 
-static int cbuild__exec_new_build(const char* exe_path, int argc,
-                                  char** argv) {
-    (void)argc;
+/* Returns only when the program could not be started. */
+static void cbuild__exec_new_build(const char* exe_path, char** argv) {
 #ifdef _WIN32
     _spawnv(_P_OVERLAY, exe_path, argv);
-    return -1;
 #else
     execv(exe_path, argv);
-    return -1;
 #endif
+}
+
+static const char* cbuild__self_rebuild_compiler(void) {
+    const char* compiler = getenv("CC_FOR_BUILD");
+    if (compiler && *compiler) return compiler;
+    compiler = getenv("CC");
+    if (compiler && *compiler) return compiler;
+#ifdef _WIN32
+    return "cl";
+#else
+    return "cc";
+#endif
+}
+
+/* Returns a malloc'd command line for system, or NULL. */
+static char* cbuild__self_rebuild_command(const char* compiler, const char* exe_path, const char* build_src) {
+    char* cmd = NULL;
+    if (detect_cc_kind(compiler) == CBUILD_CC_MSVC) {
+        append_format(&cmd, "%s /nologo /Fe:\"%s\" \"%s\" /I. /Iinclude", compiler, exe_path, build_src);
+    } else {
+        append_format(&cmd, "%s -pthread -o \"%s\" \"%s\" -I. -Iinclude", compiler, exe_path, build_src);
+    }
+#ifdef _WIN32
+    /* cmd.exe strips the first and last quote of a line that starts with a quote. */
+    if (cmd && cmd[0] == '"') {
+        char* wrapped = NULL;
+        append_format(&wrapped, "\"%s\"", cmd);
+        free(cmd);
+        cmd = wrapped;
+    }
+#endif
+    return cmd;
 }
 
 int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, const char** sources,
                                   int sources_count) {
+    (void)argc;
     char exe_path[512];
 #ifdef _WIN32
     GetModuleFileNameA(NULL, exe_path, sizeof(exe_path));
@@ -58,29 +88,31 @@ int cbuild_self_rebuild_if_needed(cbuild_context_t* ctx, int argc, char** argv, 
                                 : "build.c";  // conservative fallback
 
     if (cbuild__needs_rebuild(exe_path, sources, sources_count)) {
-        cbuild__log(ctx, CBUILD_LOG_INFO, "cbuild: Detected changes, rebuilding build executable from %s...", build_src);
-        rename(exe_path, old_path);
+        const char* compiler = cbuild__self_rebuild_compiler();
+        cbuild__log(ctx, CBUILD_LOG_INFO, "cbuild: Detected changes, rebuilding build executable from %s with %s...",
+                    build_src, compiler);
+        int moved = rename(exe_path, old_path) == 0;
 
-        char cmd[1024];
-#ifdef _WIN32
-        snprintf(cmd, sizeof(cmd),
-                 "cl /nologo /Fe:\"%s\" \"%s\" /I. /Iinclude",
-                 exe_path, build_src);
-#else
-        snprintf(cmd, sizeof(cmd),
-                 "cc -pthread -o \"%s\" \"%s\" -I. -Iinclude",
-                 exe_path, build_src);
-#endif
-        int rc = system(cmd);
+        char* cmd = cbuild__self_rebuild_command(compiler, exe_path, build_src);
+        int rc = cmd ? system(cmd) : -1;
+        free(cmd);
+        if (rc == 0) cbuild__exec_new_build(exe_path, argv);
+        if (moved) {
+            remove(exe_path);
+            if (rename(old_path, exe_path) != 0) {
+                cbuild__set_error(ctx, "Could not restore the build program from %s", old_path);
+                cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: could not restore the build program from %s", old_path);
+                return -1;
+            }
+        }
         if (rc != 0) {
-            cbuild__set_error(ctx, "Self-rebuild failed with exit code %d", rc);
-            cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: Self-rebuild failed!");
+            cbuild__set_error(ctx, "Self-rebuild with %s failed with exit code %d", compiler, rc);
+            cbuild__log(ctx, CBUILD_LOG_ERROR, "cbuild: could not rebuild with %s", compiler);
             return -1;
         }
-        if (cbuild__exec_new_build(exe_path, argc, argv) != 0) {
-            cbuild__set_error(ctx, "Failed to exec new build executable");
-            return -1;
-        }
+        cbuild__log(ctx, CBUILD_LOG_WARNING,
+                    "cbuild: could not start the rebuilt build program; continuing with the old build program "
+                    "(set CC_FOR_BUILD to a compiler for this machine)");
     }
     return 0;
 }

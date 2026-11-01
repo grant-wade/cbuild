@@ -74,11 +74,7 @@ void cbuild_set_compiler(cbuild_context_t* ctx, const char* compiler_exe) {
     }
 
     if (ctx->ld) free(ctx->ld);
-    if (ctx->cc_kind == CBUILD_CC_MSVC) {
-        ctx->ld = strdup("cl");
-    } else {
-        ctx->ld = strdup(ctx->cc);
-    }
+    ctx->ld = strdup(ctx->cc);
 }
 
 void cbuild_set_linker(cbuild_context_t* ctx, const char* linker_exe) {

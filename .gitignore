@@ -11,15 +11,4 @@ compile_commands.json
 *.sig
 *.link.sig
 *.log
-/tests/api_smoke
-/tests/api_smoke.exe
-/tests/regress work/
-/tests/runner work/
-/tests/regress template/
-/tests/runner template/
 .DS_Store
-/tests/api_smoke_split
-/tests/api_smoke_split.exe
-/tests/amalgamate
-/tests/amalgamate.exe
-/tests/split-build/

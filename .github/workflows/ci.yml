@@ -46,13 +46,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - name: Run cross-platform integration suite
+      - name: Run test suite
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
         run: |
-          chmod +x tests/run-posix.sh
-          tests/run-posix.sh
+          $CC -std=c11 build.c -o cbuild
+          ./cbuild --test
 
   freebsd:
     name: FreeBSD 15.1 Clang
@@ -63,18 +63,20 @@ jobs:
         shell: sh
     steps:
       - uses: actions/checkout@v5
-      - name: Run cross-platform integration suite
+      - name: Run test suite
         env:
           CC: clang
           CXX: clang++
-        run: sh tests/run-posix.sh
+        run: |
+          $CC -std=c11 build.c -o cbuild
+          ./cbuild --test
 
   sanitizers:
     name: Linux ASan and UBSan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Run integration suite with sanitizers
+      - name: Run test suite with sanitizers
         env:
           CC: clang
           CXX: clang++
@@ -83,15 +85,15 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
-          chmod +x tests/run-posix.sh
-          tests/run-posix.sh
+          $CC -std=c11 build.c -o cbuild
+          ./cbuild --test
 
   windows:
     name: Windows MSVC
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Run Windows integration suite
+      - name: Run test suite
         shell: cmd
         env:
           CC: cl
@@ -103,7 +105,9 @@ jobs:
           )
           call "%VS_PATH%\Common7\Tools\VsDevCmd.bat" -arch=x64
           if errorlevel 1 exit /b 1
-          pwsh -NoProfile -ExecutionPolicy Bypass -File tests/run-windows.ps1
+          cl /nologo /std:c11 /D_CRT_SECURE_NO_WARNINGS build.c /Fe:cbuild.exe
+          if errorlevel 1 exit /b 1
+          .\cbuild.exe --test
 
   release:
     name: Publish release if version changed
