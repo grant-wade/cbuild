@@ -17,9 +17,11 @@
 #ifdef _WIN32
 #define PATH_LIST_SEPARATOR ";"
 #define PATH_NOTE "Added to your user PATH"
+#define PROGRAM_PATH ".\\cbuild.exe"
 #else
 #define PATH_LIST_SEPARATOR ":"
 #define PATH_NOTE "is not on PATH"
+#define PROGRAM_PATH "./cbuild"
 #endif
 
 static const char *const echo_program =
@@ -145,6 +147,18 @@ SCENARIO(launcher, arguments_and_exit_status_pass_through) {
     EXPECT_ORDER(outcome.log, "[one two]\n", "[--three=four five]\n", "[--help]\n", "[--version]\n", "[]\n");
 }
 
+SCENARIO(launcher, build_program_starts_under_its_own_name) {
+    write_text("build.c",
+               "/* CBUILD_IMPLEMENTATION */\n"
+               "#include <stdio.h>\n"
+               "int main(int argc, char **argv) {\n"
+               "    (void)argc;\n"
+               "    printf(\"<%s>\\n\", argv[0]);\n"
+               "    return 0;\n"
+               "}\n");
+    EXPECT_HAS(BUILD(), "<" PROGRAM_PATH ">");
+}
+
 SCENARIO(launcher, build_program_still_rebuilds_itself) {
     BUILD("--list");
     settle();
@@ -220,8 +234,18 @@ SCENARIO(launcher, install_copies_a_working_launcher) {
     EXPECT_GONE(PROGRAM);
 
     use_program(installed);
+    settle();
+    touch_file("build.c");
     EXPECT_LINE(BUILD("--list"), "  test_app *[executable]*");
     EXPECT_FILE(PROGRAM);
+    EXPECT_LINE(BUILD("--launcher-version"), CBUILD_VERSION);
+}
+
+SCENARIO(launcher, install_finds_itself_when_started_from_path) {
+    const char *bin = format_text("%s/%s", scratch_home(), INSTALL_DIR);
+    BUILD("--launcher-install");
+    set_env("PATH", format_text("%s/%s%s", bin, PATH_LIST_SEPARATOR, getenv("PATH")));
+    EXPECT_HAS(RUN("cbuild", "--launcher-install").log, "Installed");
 }
 
 SCENARIO(launcher, install_replaces_an_existing_copy) {

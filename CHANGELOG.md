@@ -30,6 +30,7 @@ All notable changes to CBuild are documented here. This project follows [Semanti
 - MSVC-style compilers always linked with `cl` instead of the configured compiler.
 - Test timeouts left processes started by the test running.
 - A subcommand whose command line failed exited 0 on POSIX systems.
+- On FreeBSD, a self-rebuild took the build program's path from `argv[0]`.
 - Stopping `--test` with a signal left running tests behind on POSIX.
 - Subproject manifests ignore output lines that are not targets.
 - `--manifest` and `--list` printed `(null)/...` paths when the output directory was left at its default, and outdated paths when it was set after the target was created.

@@ -109,6 +109,7 @@ static int start_build_program(int argc, char **argv) {
     if (status != -1) return status;
 #else
     (void)argc;
+    argv[0] = (char *)BUILD_PROGRAM_PATH;
     execv(BUILD_PROGRAM_PATH, argv);
 #endif
     fprintf(stderr, "cbuild: could not start " BUILD_PROGRAM_PATH "; delete it to compile it again\n");

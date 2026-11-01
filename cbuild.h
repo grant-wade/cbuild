@@ -5856,6 +5856,10 @@ static void cbuild__self_path(char* out, size_t size, const char* argv0) {
 #elif defined(__APPLE__)
     uint32_t sz = (uint32_t)size;
     if (_NSGetExecutablePath(out, &sz) != 0) snprintf(out, size, "%s", argv0);
+#elif defined(__FreeBSD__)
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+    size_t len = size;
+    if (sysctl(mib, 4, out, &len, NULL, 0) != 0) snprintf(out, size, "%s", argv0);
 #else
     ssize_t len = readlink("/proc/self/exe", out, size - 1);
     if (len > 0)

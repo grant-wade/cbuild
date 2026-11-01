@@ -140,6 +140,7 @@
     X(launcher, files_without_the_implementation_are_skipped)        \
     X(launcher, the_nearest_build_program_wins)                      \
     X(launcher, arguments_and_exit_status_pass_through)              \
+    X(launcher, build_program_starts_under_its_own_name)             \
     X(launcher, build_program_still_rebuilds_itself)                 \
     X(launcher, staleness_is_left_to_the_build_program)              \
     X(launcher, compiler_choice_matches_self_rebuild)                \
@@ -149,6 +150,7 @@
     X(launcher, outside_a_project_it_answers_for_itself)             \
     X(launcher, own_flags_skip_the_project)                          \
     X(launcher, install_copies_a_working_launcher)                   \
+    X(launcher, install_finds_itself_when_started_from_path)         \
     X(launcher, install_replaces_an_existing_copy)                   \
     X(launcher, install_reports_whether_path_has_it)                 \
     X(launcher, install_needs_a_home_directory)                      \
